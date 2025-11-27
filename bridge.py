@@ -83,6 +83,21 @@ class LMUBridge:
             pass
         return None, None
 
+    def _get_damage_status(self, veh_tele):
+        """Calcule un indice de dégâts global basique et détecte la surchauffe."""
+        if not veh_tele:
+            return 0, False
+        
+        # mDentSeverity est un tableau de 8 octets (0=ok, 1=léger, 2=moyen, etc.)
+        # On fait une somme simple pour avoir un indice global de "santé" carrosserie
+        dents = veh_tele.mDentSeverity
+        total_damage = sum(dents) 
+        
+        # mOverheating est un booléen
+        overheating = bool(veh_tele.mOverheating)
+        
+        return total_damage, overheating
+
     def _update_lap_metrics(self, current_lap: int, current_fuel: float, current_lap_time_last: float, current_tire_wear_cumulative: list[float]):
         """Met à jour la consommation, l'usure et le temps moyen après un tour complet."""
 
@@ -167,7 +182,7 @@ class LMUBridge:
             fuel = float(veh_tele.mFuel)
             lap_time_last = float(veh_scor.mLastLapTime)
             
-            # NOUVELLE DONNÉE : Capacité du réservoir
+            # Capacité du réservoir
             fuel_capacity = float(veh_tele.mFuelCapacity) if veh_tele else 0.0
             session_remaining_time = 0.0
             
@@ -178,7 +193,7 @@ class LMUBridge:
 
             for wheel in veh_tele.mWheels:
                 tire_wear_values.append(float(wheel.mWear))
-                # NOTE : Conversion de la température des freins
+                # Conversion de la température des freins et pneus
                 brake_temp_values.append(float(wheel.mBrakeTemp)+ KELVIN_TO_CELSIUS) 
                 if len(wheel.mTemperature) > 1:
                     temp_k = float(wheel.mTemperature[1])
@@ -208,26 +223,37 @@ class LMUBridge:
                 else:
                     weather_status = "SUNNY"
                     
-                # NOUVELLE DONNÉE : Durée restante = Temps de fin - Temps écoulé
+                # Durée restante = Temps de fin - Temps écoulé
                 session_remaining_time = float(scor_info.mEndET) - float(scor_info.mCurrentET)
 
             # --- NOUVELLES DONNÉES RÉGLAGES/AIDES (Incluant correction TC) ---
             tc_setting = -1
             brake_bias_front_pct = 0.0
             
-            # Mode Moteur / ERS (doit être lu avant la correction TC)
+            # Mode Moteur / ERS
             engine_mode = int(veh_tele.mElectricBoostMotorState) if veh_tele else 0
 
             if physics:
                  tc_setting = int(physics.mTractionControl)
             
-            # Correction du TC : si l'assistance est à 0, utiliser le mode moteur à la place.
+            # Correction du TC : si l'assistance est à 0, utiliser le mode moteur à la place (souvent le cas en Hypercar)
             if tc_setting == 0: 
                 tc_setting = engine_mode
                 
             if veh_tele:
                 brake_bias_rear = float(veh_tele.mRearBrakeBias)
                 brake_bias_front_pct = round((1.0 - brake_bias_rear) * 100.0, 1)
+
+            # --- NOUVELLES DONNÉES POUR LA STRATÉGIE (PITS & DÉGÂTS) ---
+            # 1. État du Pit (0=None, 1=Request, 2=Entering, 3=Stopped, 4=Exiting)
+            pit_state = int(veh_scor.mPitState)
+            in_pit_lane = bool(veh_scor.mInPits)
+            
+            # 2. Dégâts
+            damage_index, is_overheating = self._get_damage_status(veh_tele)
+            
+            # 3. Temps estimé au tour (fourni par le jeu, sinon fallback sur moyenne)
+            estimated_lap_game = float(veh_scor.mEstimatedLapTime)
 
             # --- CALCULS/MISE À JOUR DE L'ÉTAT ---
             # Appel de la fonction de mise à jour des métriques (incluant le nouveau temps au tour)
@@ -262,6 +288,14 @@ class LMUBridge:
                 # --- NOUVELLES DONNÉES DE SESSION ET CAPACITÉ ---
                 "sessionTimeRemainingSeconds": round(max(0, session_remaining_time), 0),
                 "fuelTankCapacityL": round(fuel_capacity, 2),
+                
+                # --- NOUVEAUX CHAMPS STRATÉGIE (PITS & DÉGÂTS) ---
+                "pitState": pit_state,       # Pour savoir si on est en train de faire l'arrêt
+                "inPitLane": in_pit_lane,
+                "damageIndex": damage_index, # Si > 0, on pourrait avoir des réparations
+                "isOverheating": is_overheating,
+                "gameEstimatedLapTime": estimated_lap_game,
+                # -------------------------------------------------
                 
                 # --- DONNÉES MÉTÉO & SETUP ---
                 "weather": weather_status,
@@ -300,6 +334,8 @@ class LMUBridge:
                 self.last_fuel < 0
                 or abs(fuel - self.last_fuel) > 0.05
                 or current_lap != self.last_lap
+                or damage_index > 0 # On envoie toujours si dégâts détectés
+                or in_pit_lane # On envoie toujours si dans les stands
             ):
                 if db:
                     try:
@@ -307,10 +343,13 @@ class LMUBridge:
                             data_to_send, merge=True
                         )
                         # AFFICHAGE MIS À JOUR
+                        pit_msg = " [PIT]" if in_pit_lane else ""
+                        dmg_msg = f" [DMG:{damage_index}]" if damage_index > 0 else ""
+                        
                         print(
-                            f"📡 ENVOI | {driver_name} ({car_category}) P{position} | Lap {current_lap} | "
-                            f"Fuel: {data_to_send['fuelRemainingL']} L / {data_to_send['fuelTankCapacityL']} L | "
-                            f"Time Left: {data_to_send['sessionTimeRemainingSeconds']:.0f}s | Bias: {data_to_send['brakeBiasFront']}% | TC/Mode: {tc_setting} | Avg Lap: {self.ema_lap_time:.3f}s",
+                            f"📡 ENVOI{pit_msg}{dmg_msg} | {driver_name} ({car_category}) P{position} | Lap {current_lap} | "
+                            f"Fuel: {data_to_send['fuelRemainingL']} L | "
+                            f"Time Left: {data_to_send['sessionTimeRemainingSeconds']:.0f}s | Avg Lap: {self.ema_lap_time:.3f}s",
                             end="\r",
                         )
                         self.last_fuel = fuel
@@ -319,8 +358,8 @@ class LMUBridge:
                 else:
                     print(
                         f"📊 DONNÉES | {driver_name} ({car_category}) P{position} | Lap {current_lap} | "
-                        f"Fuel: {data_to_send['fuelRemainingL']} L / {data_to_send['fuelTankCapacityL']} L | "
-                        f"Time Left: {data_to_send['sessionTimeRemainingSeconds']:.0f}s | Bias: {data_to_send['brakeBiasFront']}% | TC/Mode: {tc_setting} | Météo: {weather_status} | Avg Lap: {self.ema_lap_time:.3f}s",
+                        f"Fuel: {data_to_send['fuelRemainingL']} L | "
+                        f"Time Left: {data_to_send['sessionTimeRemainingSeconds']:.0f}s | Avg Lap: {self.ema_lap_time:.3f}s",
                         end="\r",
                     )
                     self.last_fuel = fuel
