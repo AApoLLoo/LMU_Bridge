@@ -147,7 +147,7 @@ class SimLMU(Connector):
         return set_dataset_rf2(self.shmmapi, self.restapi)
 
     def setup(self, config: dict):
-        self.shmmapi.setMode(config["access_mode"])
+        self.shmmapi.setMode(config["copy_access"])
         self.shmmapi.setPID(config["process_id"])
         self.shmmapi.setStateOverride(config["enable_active_state_override"])
         self.shmmapi.setActiveState(config["active_state"])

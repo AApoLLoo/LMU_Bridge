@@ -130,7 +130,7 @@ class LMUBridge:
 
     def run(self):
         while True:
-            time.sleep(0.5)
+            time.sleep(0.1)  # Petite pause pour éviter une boucle trop rapide
             if not self.sim.isRF2running():
                 print("⏳ Jeu ou plugin shared memory non détecté...", end="\r")
                 continue
@@ -155,14 +155,19 @@ class LMUBridge:
             current_lap = int(veh_scor.mTotalLaps) 
             fuel = float(veh_tele.mFuel)
             lap_time_last = float(veh_scor.mLastLapTime)
-
+            
+            # NOUVELLE DONNÉE : Capacité du réservoir
+            fuel_capacity = float(veh_tele.mFuelCapacity) if veh_tele else 0.0
+            session_remaining_time = 0.0
+            
             # --- DONNÉES PNEUS & TEMPÉRATURES ---
             tire_wear_values = [] 
             brake_temp_values = []
             tire_temp_center_values = []
             for wheel in veh_tele.mWheels:
                 tire_wear_values.append(float(wheel.mWear))
-                brake_temp_values.append(float(wheel.mBrakeTemp)+ KELVIN_TO_CELSIUS)
+                # NOTE : On conserve la logique de l'utilisateur pour la conversion des freins, même si elle semble non standard.
+                brake_temp_values.append(float(wheel.mBrakeTemp)+ KELVIN_TO_CELSIUS) 
                 if len(wheel.mTemperature) > 1:
                     temp_k = float(wheel.mTemperature[1])
                     temp_c = temp_k + KELVIN_TO_CELSIUS
@@ -176,12 +181,11 @@ class LMUBridge:
             ambient_temp_c = 0.0
             track_wetness_pct = 0.0
             weather_status = "UNKNOWN"
-            session_end_et = 0.0 # Nouvelle donnée : Durée/Fin de session
             
             if scor_info:
                 # Météo
                 ambient_temp_k = float(scor_info.mAmbientTemp)
-                ambient_temp_c = round(ambient_temp_k + KELVIN_TO_CELSIUS, 1)
+                ambient_temp_c = round(ambient_temp_k, 1)
                 track_wetness_pct = round(float(scor_info.mAvgPathWetness) * 100.0, 1)
                 rain_severity = float(scor_info.mRaining)
                 
@@ -192,8 +196,8 @@ class LMUBridge:
                 else:
                     weather_status = "SUNNY"
                     
-                # Session
-                session_end_et = float(scor_info.mEndET) # Durée totale de la session en secondes
+                # NOUVELLE DONNÉE : Durée restante = Temps de fin - Temps écoulé
+                session_remaining_time = float(scor_info.mEndET) - float(scor_info.mCurrentET)
 
             # --- NOUVELLES DONNÉES RÉGLAGES/AIDES ---
             tc_setting = -1
@@ -231,8 +235,9 @@ class LMUBridge:
                 "fuelRemainingL": round(fuel, 2),
                 "fuelConsumptionPerLapL": self.consumption_5_laps,
                 
-                # --- NOUVELLE DONNÉE DE DURÉE DE SESSION ---
-                "sessionEndTimeSeconds": session_end_et,
+                # --- NOUVELLES DONNÉES DE SESSION ET CAPACITÉ ---
+                "sessionTimeRemainingSeconds": round(max(0, session_remaining_time), 0),
+                "fuelTankCapacityL": round(fuel_capacity, 2),
                 
                 # --- DONNÉES MÉTÉO & SETUP ---
                 "weather": weather_status,
@@ -243,10 +248,11 @@ class LMUBridge:
                 "engineMode": engine_mode,
                 
                 # Usure restante (télémétrie)
-                "tireWearFL": wear_remaining_pct[0] if len(wear_remaining_pct) > 0 else 0.0,
-                "tireWearFR": wear_remaining_pct[1] if len(wear_remaining_pct) > 1 else 0.0,
-                "tireWearRL": wear_remaining_pct[2] if len(wear_remaining_pct) > 2 else 0.0,
-                "tireWearRR": wear_remaining_pct[3] if len(wear_remaining_pct) > 3 else 0.0,
+                "tireWearFL" : 100.0 - wear_remaining_pct[0] if len(wear_remaining_pct) > 0 else 100.0,
+                "tireWearFR" : 100.0 - wear_remaining_pct[1] if len(wear_remaining_pct) > 1 else 100.0,
+                "tireWearRL" : 100.0 - wear_remaining_pct[2] if len(wear_remaining_pct) > 2 else 100.0,
+                "tireWearRR" : 100.0 - wear_remaining_pct[3] if len(wear_remaining_pct) > 3 else 100.0,
+
 
                 # Usure moyenne par tour (stratégie)
                 "avgWearPerLapFL": self.average_wear_per_lap[0],
@@ -277,9 +283,11 @@ class LMUBridge:
                         db.collection("strategies").document(team_id).set(
                             data_to_send, merge=True
                         )
+                        # AFFICHAGE MIS À JOUR
                         print(
                             f"📡 ENVOI | {driver_name} ({car_category}) P{position} | Lap {current_lap} | "
-                            f"Time End: {session_end_et:.0f}s | TC: {tc_setting} | Bias: {data_to_send['brakeBiasFront']}% | Météo: {weather_status}",
+                            f"Fuel: {data_to_send['fuelRemainingL']} L / {data_to_send['fuelTankCapacityL']} L | "
+                            f"Time Left: {data_to_send['sessionTimeRemainingSeconds']:.0f}s | Bias: {data_to_send['brakeBiasFront']}%",
                             end="\r",
                         )
                         self.last_fuel = fuel
@@ -288,7 +296,8 @@ class LMUBridge:
                 else:
                     print(
                         f"📊 DONNÉES | {driver_name} ({car_category}) P{position} | Lap {current_lap} | "
-                        f"Time End: {session_end_et:.0f}s | TC: {tc_setting} | Bias: {data_to_send['brakeBiasFront']}% | Météo: {weather_status}",
+                        f"Fuel: {data_to_send['fuelRemainingL']} L / {data_to_send['fuelTankCapacityL']} L | "
+                        f"Time Left: {data_to_send['sessionTimeRemainingSeconds']:.0f}s | Bias: {data_to_send['brakeBiasFront']}% | Météo: {weather_status}",
                         end="\r",
                     )
                     self.last_fuel = fuel
