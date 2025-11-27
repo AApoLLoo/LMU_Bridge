@@ -47,11 +47,15 @@ class LMUBridge:
         self.sim = SimInfoAPI()
         self.last_fuel = -1.0
         self.last_lap = 0
-        self.fuel_start_5_laps = -1.0
-        self.consumption_5_laps = 0.0
-        self.lap_counter_5_laps = 0
         
-        # Nouveaux champs pour l'usure par tour (fraction worn)
+        # Remplacement de la consommation 5-tours par EMA
+        self.last_lap_fuel_start = -1.0 # Le point de départ du fuel pour le calcul de consommation du tour
+        self.ema_fuel_consumption = 0.0
+        
+        # Ajout du temps au tour moyen (EMA)
+        self.ema_lap_time = 0.0
+        
+        # Champs pour l'usure des pneus par tour (fraction worn)
         self.last_tire_wear_cumulative = [0.0] * 4 
         self.average_wear_per_lap = [0.0] * 4 
         self.lap_counter_wear = 0 
@@ -79,41 +83,47 @@ class LMUBridge:
             pass
         return None, None
 
-    def _update_lap_metrics(self, current_lap: int, current_fuel: float, current_wear_cumulative: list[float]):
-        """Met à jour la consommation et l'usure moyenne après un tour complet."""
+    def _update_lap_metrics(self, current_lap: int, current_fuel: float, current_lap_time_last: float, current_tire_wear_cumulative: list[float]):
+        """Met à jour la consommation, l'usure et le temps moyen après un tour complet."""
 
         # Initialisation des valeurs de référence au premier appel si ce n'est pas déjà fait
         if self.last_lap == 0 and current_lap > 0:
-            self.last_tire_wear_cumulative = current_wear_cumulative
+            self.last_tire_wear_cumulative = current_tire_wear_cumulative
             self.last_fuel = current_fuel
             self.last_lap = current_lap
+            self.last_lap_fuel_start = current_fuel 
             return
 
         is_new_lap = current_lap != self.last_lap and current_lap > 0
-        
+        alpha = 0.1 # Facteur de lissage EMA
+
         if is_new_lap:
             
-            # --- Consommation de Fuel (sur 5 tours) ---
-            if self.lap_counter_5_laps == 0:
-                self.fuel_start_5_laps = current_fuel
-                self.lap_counter_5_laps = 1
-                self.consumption_5_laps = 0.0
-            elif self.lap_counter_5_laps < 5:
-                self.lap_counter_5_laps += 1
-            elif self.lap_counter_5_laps == 5:
-                fuel_used = self.fuel_start_5_laps - current_fuel
-                if fuel_used > 0:
-                    self.consumption_5_laps = round(fuel_used / 5.0, 3)
+            # --- Consommation de Fuel (EMA) ---
+            # Calcule la consommation sur le tour précédent
+            fuel_used = self.last_lap_fuel_start - current_fuel if self.last_lap_fuel_start > 0 else 0.0
+
+            if fuel_used > 0:
+                if self.ema_fuel_consumption == 0.0:
+                    self.ema_fuel_consumption = round(fuel_used, 3)
                 else:
-                    self.consumption_5_laps = 0.0
-                self.fuel_start_5_laps = current_fuel
-                self.lap_counter_5_laps = 1
+                    # Applique l'EMA
+                    self.ema_fuel_consumption = round(alpha * fuel_used + (1 - alpha) * self.ema_fuel_consumption, 3)
+            
+            self.last_lap_fuel_start = current_fuel # Mise à jour du point de départ pour le prochain tour
+            
+            # --- Temps au Tour Moyen (EMA) ---
+            if current_lap_time_last > 0 and current_lap_time_last < 999: # Filtre les temps valides et non excessifs
+                if self.ema_lap_time == 0.0:
+                    self.ema_lap_time = round(current_lap_time_last, 3)
+                else:
+                    # Applique l'EMA
+                    self.ema_lap_time = round(alpha * current_lap_time_last + (1 - alpha) * self.ema_lap_time, 3)
             
             # --- Usure des Pneus par Tour (Moyenne lissée) ---
-            alpha = 0.1 
             
             for i in range(4):
-                wear_delta = max(0, current_wear_cumulative[i] - self.last_tire_wear_cumulative[i])
+                wear_delta = max(0, current_tire_wear_cumulative[i] - self.last_tire_wear_cumulative[i])
                 
                 if self.lap_counter_wear < 5:
                     if wear_delta > 0.0:
@@ -124,7 +134,8 @@ class LMUBridge:
             if self.lap_counter_wear < 5:
                 self.lap_counter_wear += 1
 
-            self.last_tire_wear_cumulative = current_wear_cumulative
+            self.last_tire_wear_cumulative = current_tire_wear_cumulative
+            
             self.last_lap = current_lap
 
 
@@ -164,9 +175,10 @@ class LMUBridge:
             tire_wear_values = [] 
             brake_temp_values = []
             tire_temp_center_values = []
+
             for wheel in veh_tele.mWheels:
                 tire_wear_values.append(float(wheel.mWear))
-                # NOTE : On conserve la logique de l'utilisateur pour la conversion des freins, même si elle semble non standard.
+                # NOTE : Conversion de la température des freins
                 brake_temp_values.append(float(wheel.mBrakeTemp)+ KELVIN_TO_CELSIUS) 
                 if len(wheel.mTemperature) > 1:
                     temp_k = float(wheel.mTemperature[1])
@@ -199,21 +211,28 @@ class LMUBridge:
                 # NOUVELLE DONNÉE : Durée restante = Temps de fin - Temps écoulé
                 session_remaining_time = float(scor_info.mEndET) - float(scor_info.mCurrentET)
 
-            # --- NOUVELLES DONNÉES RÉGLAGES/AIDES ---
+            # --- NOUVELLES DONNÉES RÉGLAGES/AIDES (Incluant correction TC) ---
             tc_setting = -1
             brake_bias_front_pct = 0.0
+            
+            # Mode Moteur / ERS (doit être lu avant la correction TC)
+            engine_mode = int(veh_tele.mElectricBoostMotorState) if veh_tele else 0
+
             if physics:
                  tc_setting = int(physics.mTractionControl)
+            
+            # Correction du TC : si l'assistance est à 0, utiliser le mode moteur à la place.
+            if tc_setting == 0: 
+                tc_setting = engine_mode
+                
             if veh_tele:
                 brake_bias_rear = float(veh_tele.mRearBrakeBias)
                 brake_bias_front_pct = round((1.0 - brake_bias_rear) * 100.0, 1)
-            
-            # --- MODE MOTEUR / ERS ---
-            engine_mode = int(veh_tele.mElectricBoostMotorState) if veh_tele else 0
 
             # --- CALCULS/MISE À JOUR DE L'ÉTAT ---
-            self._update_lap_metrics(current_lap, fuel, tire_wear_values)
-
+            # Appel de la fonction de mise à jour des métriques (incluant le nouveau temps au tour)
+            self._update_lap_metrics(current_lap, fuel, lap_time_last, tire_wear_values)
+            
             # --- MAPPING POUR FIREBASE ---
             if "LMP2" in car_category.upper():
                 team_id = DEFAULT_TEAM_ID_LMP2
@@ -233,7 +252,12 @@ class LMUBridge:
                 "currentLap": current_lap,
                 "lapTimeLast": lap_time_last, 
                 "fuelRemainingL": round(fuel, 2),
-                "fuelConsumptionPerLapL": self.consumption_5_laps,
+                
+                # Remplacement de l'ancienne consommation 5-tours par l'EMA
+                "averageConsumptionFuel": self.ema_fuel_consumption, 
+                
+                # Ajout du temps au tour moyen (EMA)
+                "averageLapTime": self.ema_lap_time,
                 
                 # --- NOUVELLES DONNÉES DE SESSION ET CAPACITÉ ---
                 "sessionTimeRemainingSeconds": round(max(0, session_remaining_time), 0),
@@ -243,16 +267,15 @@ class LMUBridge:
                 "weather": weather_status,
                 "airTemp": ambient_temp_c,
                 "trackWetness": track_wetness_pct,
-                "tcSetting": tc_setting,
+                "tcSetting": tc_setting, # Le TC corrigé est envoyé
                 "brakeBiasFront": brake_bias_front_pct,
                 "engineMode": engine_mode,
-                
-                # Usure restante (télémétrie)
+
+                # Usure restante des pneus (télémétrie)
                 "tireWearFL" : 100.0 - wear_remaining_pct[0] if len(wear_remaining_pct) > 0 else 100.0,
                 "tireWearFR" : 100.0 - wear_remaining_pct[1] if len(wear_remaining_pct) > 1 else 100.0,
                 "tireWearRL" : 100.0 - wear_remaining_pct[2] if len(wear_remaining_pct) > 2 else 100.0,
                 "tireWearRR" : 100.0 - wear_remaining_pct[3] if len(wear_remaining_pct) > 3 else 100.0,
-
 
                 # Usure moyenne par tour (stratégie)
                 "avgWearPerLapFL": self.average_wear_per_lap[0],
@@ -287,7 +310,7 @@ class LMUBridge:
                         print(
                             f"📡 ENVOI | {driver_name} ({car_category}) P{position} | Lap {current_lap} | "
                             f"Fuel: {data_to_send['fuelRemainingL']} L / {data_to_send['fuelTankCapacityL']} L | "
-                            f"Time Left: {data_to_send['sessionTimeRemainingSeconds']:.0f}s | Bias: {data_to_send['brakeBiasFront']}%",
+                            f"Time Left: {data_to_send['sessionTimeRemainingSeconds']:.0f}s | Bias: {data_to_send['brakeBiasFront']}% | TC/Mode: {tc_setting} | Avg Lap: {self.ema_lap_time:.3f}s",
                             end="\r",
                         )
                         self.last_fuel = fuel
@@ -297,7 +320,7 @@ class LMUBridge:
                     print(
                         f"📊 DONNÉES | {driver_name} ({car_category}) P{position} | Lap {current_lap} | "
                         f"Fuel: {data_to_send['fuelRemainingL']} L / {data_to_send['fuelTankCapacityL']} L | "
-                        f"Time Left: {data_to_send['sessionTimeRemainingSeconds']:.0f}s | Bias: {data_to_send['brakeBiasFront']}% | Météo: {weather_status}",
+                        f"Time Left: {data_to_send['sessionTimeRemainingSeconds']:.0f}s | Bias: {data_to_send['brakeBiasFront']}% | TC/Mode: {tc_setting} | Météo: {weather_status} | Avg Lap: {self.ema_lap_time:.3f}s",
                         end="\r",
                     )
                     self.last_fuel = fuel
