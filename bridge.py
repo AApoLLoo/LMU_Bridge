@@ -180,7 +180,6 @@ class LMUBridge:
         self.last_registered_driver = None
         
         # --- OPTIMISATION HTTP PERSISTANTE ---
-        # On crée une session qui reste ouverte. C'est le secret de la vitesse sans clé privée.
         self.http_session = requests.Session()
         
         # Configuration des retries pour la robustesse
@@ -462,9 +461,11 @@ class LMUBridge:
                 "lastLapFuelConsumption": self.last_lap_fuel_consumption,
                 "tireCompoundFL": f_compound, "tireCompoundFR": f_compound,
                 "tireCompoundRL": r_compound, "tireCompoundRR": r_compound,
-                "batterySoc": battery_soc_pct, "virtualEnergyRemainingPct": ve_pct,
-                "virtualEnergyConsumptionLastLap": self.last_lap_energy_consumption,
-                "virtualEnergyAverageConsumption": self.avg_energy_consumption,
+                "batterySoc": battery_soc_pct, 
+                # CORRECTION DES CLES VE POUR MATCH LE FRONTEND
+                "virtualEnergy": ve_pct, 
+                "virtualEnergyLastLapCons": self.last_lap_energy_consumption,
+                "virtualEnergyAvgCons": self.avg_energy_consumption,
                 "averageLapTime": self.ema_lap_time,
                 "sessionTimeRemainingSeconds": round(max(0, session_remaining_time), 0),
                 "fuelTankCapacityL": round(fuel_capacity, 2),
@@ -496,7 +497,7 @@ class LMUBridge:
 
             self.send_async("strategies", team_id, data_to_send)
             status = "[GARAGE]" if in_garage else "[PITS]" if in_pit_lane else "[TRACK]"
-            print(f"🚀 {team_id} | {status} | {speed_kmh} km/h | Fuel: {data_to_send['fuelRemainingL']}L", end="\r")
+            print(f"🚀 {team_id} | {status} | {speed_kmh} km/h | Fuel: {data_to_send['fuelRemainingL']}L | VE : {ve_pct} | Veconso : {self.last_lap_energy_consumption}", end="\r")
             self.last_fuel = fuel
 
 if __name__ == "__main__":
