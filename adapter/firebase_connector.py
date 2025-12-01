@@ -11,23 +11,39 @@ DEFAULT_API_KEY = "AIzaSyAezT5Np6-v18OBR1ICV3uHoFViQB555sg"
 DEFAULT_PROJECT_ID = "le-mans-strat"
 
 def to_firestore_value(value):
-    """Convertit les types Python en types Firestore REST API"""
-    if value is None: return {"nullValue": None}
-    if isinstance(value, bool): return {"booleanValue": value}
-    if isinstance(value, int): return {"integerValue": str(value)}
-    if isinstance(value, float): return {"doubleValue": value}
-    if isinstance(value, str): return {"stringValue": value}
-    if isinstance(value, list): 
+    """
+    Convertit récursivement n'importe quel type Python en format Firestore REST API.
+    Gère les dicts imbriqués, les listes, les nulls, etc.
+    """
+    if value is None:
+        return {"nullValue": None}
+    
+    if isinstance(value, bool):
+        return {"booleanValue": value}
+    
+    if isinstance(value, int):
+        return {"integerValue": str(value)} # Firestore exige des entiers en string
+    
+    if isinstance(value, float):
+        return {"doubleValue": value}
+    
+    if isinstance(value, str):
+        return {"stringValue": value}
+    
+    if isinstance(value, list) or isinstance(value, tuple):
         return {"arrayValue": {"values": [to_firestore_value(x) for x in value]}}
+    
     if isinstance(value, dict):
         return {"mapValue": {"fields": {k: to_firestore_value(v) for k, v in value.items()}}}
+    
+    # Fallback pour tout autre objet (ex: numpy types) -> String
     return {"stringValue": str(value)}
 
 class FirebaseConnector:
     def __init__(self, api_key=DEFAULT_API_KEY, project_id=DEFAULT_PROJECT_ID):
         self.api_key = api_key
         self.project_id = project_id
-        self.upload_queue = queue.Queue(maxsize=1)
+        self.upload_queue = queue.Queue(maxsize=1) # On garde uniquement le dernier état
         self.running = False
         self.worker_thread = None
         
@@ -46,40 +62,34 @@ class FirebaseConnector:
         if self.worker_thread and self.worker_thread.is_alive():
             self.worker_thread.join(timeout=1.0)
 
-    # --- MÉTHODES DE GESTION D'ÉQUIPE ---
-
     def get_team_info(self, collection, doc_id):
-        """Vérifie si l'équipe existe et retourne ses infos de base (catégorie, etc.)"""
         url = f"https://firestore.googleapis.com/v1/projects/{self.project_id}/databases/(default)/documents/{collection}/{doc_id}"
         try:
-            resp = self.http_session.get(url, params={"key": self.api_key})
+            resp = self.http_session.get(url, params={"key": self.api_key}, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
                 fields = data.get("fields", {})
                 
-                # Extraction propre de la catégorie
+                # Extraction simplifiée
                 category = fields.get("carCategory", {}).get("stringValue", "Unknown")
                 
-                # Extraction des pilotes pour vérification
-                drivers_array = fields.get("drivers", {}).get("arrayValue", {}).get("values", [])
                 drivers = []
-                for d in drivers_array:
-                    drv_map = d.get("mapValue", {}).get("fields", {})
-                    name = drv_map.get("name", {}).get("stringValue", "")
+                drivers_raw = fields.get("drivers", {}).get("arrayValue", {}).get("values", [])
+                for d in drivers_raw:
+                    name = d.get("mapValue", {}).get("fields", {}).get("name", {}).get("stringValue", "")
                     if name: drivers.append(name)
                 
                 return {"exists": True, "category": category, "drivers": drivers}
             elif resp.status_code == 404:
                 return {"exists": False}
         except Exception as e:
-            print(f"Erreur vérification équipe: {e}")
+            print(f"Erreur GET Firebase: {e}")
         return None
 
     def create_team(self, collection, doc_id, category, drivers_list):
-        """Crée une nouvelle Line Up complète"""
+        """Crée une nouvelle équipe avec la structure complète"""
         url = f"https://firestore.googleapis.com/v1/projects/{self.project_id}/databases/(default)/documents/{collection}/{doc_id}"
         
-        # Construction de la liste des pilotes formatée
         formatted_drivers = []
         for d_name in drivers_list:
             d_name = d_name.strip()
@@ -91,14 +101,12 @@ class FirebaseConnector:
                     "color": f"#{color_hash}"
                 })
         
-        # Données par défaut pour une nouvelle session
         initial_data = {
             "id": doc_id,
             "carCategory": category,
             "drivers": formatted_drivers,
             "activeDriverId": formatted_drivers[0]["id"] if formatted_drivers else "TBD",
-            "createdAt": str(requests.utils.quote(str(threading.get_ident()))), # Timestamp simulé ou string
-            # Valeurs par défaut du jeu
+            "createdAt": "NOW",
             "currentStint": 0,
             "raceTime": 24 * 3600,
             "sessionTimeRemaining": 24 * 3600,
@@ -116,63 +124,48 @@ class FirebaseConnector:
             "lastPacketTime": 0
         }
 
-        # Conversion et Envoi
         fields = {k: to_firestore_value(v) for k, v in initial_data.items()}
-        # On ajoute un timestamp serveur pour createdAt
-        fields["createdAt"] = {"timestampValue": "2024-01-01T00:00:00Z"} # Placeholder, sera écrasé par le serveur si on utilisait transform, mais REST direct c'est plus dur. On met une date fixe ou locale.
+        # Timestamp serveur obligatoire pour createdAt
+        fields["createdAt"] = {"timestampValue": "2024-06-15T14:00:00Z"} 
         
         payload = {"fields": fields}
         
         try:
-            # On utilise PATCH pour créer ou écraser (si on force)
-            self.http_session.patch(url, params={"key": self.api_key}, json=payload)
-            print(f"✅ Équipe '{doc_id}' créée avec succès (Catégorie: {category}, Pilotes: {len(formatted_drivers)})")
-            return True
+            resp = self.http_session.patch(url, params={"key": self.api_key}, json=payload)
+            if resp.status_code == 200:
+                return True
+            else:
+                print(f"Erreur Création ({resp.status_code}): {resp.text}")
+                return False
         except Exception as e:
-            print(f"❌ Erreur création équipe: {e}")
+            print(f"Exception Création: {e}")
             return False
 
     def register_driver_if_new(self, collection, doc_id, driver_name):
-        """Ajoute le pilote s'il n'est pas déjà dans la liste"""
-        team_info = self.get_team_info(collection, doc_id)
-        if not team_info or not team_info["exists"]:
-            return False # L'équipe doit exister pour rejoindre
+        # Simplification: on tente une lecture d'abord
+        info = self.get_team_info(collection, doc_id)
+        if not info or not info["exists"]: return False
+        
+        if any(d.lower() == driver_name.lower() for d in info["drivers"]):
+            return True # Déjà là
             
-        current_drivers = team_info.get("drivers", [])
-        
-        # Si le pilote existe déjà, on ne fait rien
-        if any(d.lower() == driver_name.lower() for d in current_drivers):
-            return True 
+        # Ajout (Lecture -> Append -> Ecriture car REST API ne supporte pas arrayUnion natif simple)
+        return self._add_driver_unsafe(collection, doc_id, driver_name)
 
-        # Sinon on ajoute
-        print(f"➕ Ajout du pilote '{driver_name}' à la Line Up...")
-        # Note: Pour ajouter proprement à un tableau via REST sans écraser, c'est complexe.
-        # Ici on fait : Lecture (déjà faite dans get_team_info) -> Ajout local -> Écriture complète
-        # C'est acceptable pour ce cas d'usage (pas de concurrence massive à la milliseconde).
-        
-        # On reconstruit la liste complète d'objets drivers (car get_team_info ne renvoyait que les noms)
-        # Il faut refaire un GET complet ou améliorer get_team_info.
-        # Pour simplifier, on utilise la méthode register_driver que j'avais faite avant :
-        return self.register_driver(collection, doc_id, driver_name)
-
-    def register_driver(self, collection, doc_id, driver_name):
-        """Logique d'ajout (reprise et adaptée)"""
+    def _add_driver_unsafe(self, collection, doc_id, driver_name):
+        # Cette méthode n'est pas atomique mais suffisante ici
         url = f"https://firestore.googleapis.com/v1/projects/{self.project_id}/databases/(default)/documents/{collection}/{doc_id}"
         try:
+            # 1. Lire
             resp = self.http_session.get(url, params={"key": self.api_key})
             if resp.status_code != 200: return False
+            current_fields = resp.json().get("fields", {})
             
-            data = resp.json()
-            fields = data.get("fields", {})
-            drivers_array = fields.get("drivers", {}).get("arrayValue", {}).get("values", [])
+            drivers_array = current_fields.get("drivers", {}).get("arrayValue", {}).get("values", [])
             
-            current_driver_objs = []
-            for d in drivers_array:
-                current_driver_objs.append(d) # On garde le format brut Firestore
-            
-            # Création du nouveau driver format Firestore
+            # 2. Modifier
             color_hash = hashlib.md5(driver_name.encode()).hexdigest()[:6]
-            new_driver_fs = {
+            new_driver = {
                 "mapValue": {
                     "fields": {
                         "id": {"stringValue": driver_name},
@@ -181,17 +174,17 @@ class FirebaseConnector:
                     }
                 }
             }
+            drivers_array.append(new_driver)
             
-            current_driver_objs.append(new_driver_fs)
-            
+            # 3. Ecrire (PATCH partiel)
             payload = {
                 "fields": {
-                    "drivers": {"arrayValue": {"values": current_driver_objs}}
+                    "drivers": {"arrayValue": {"values": drivers_array}}
                 }
             }
             self.http_session.patch(url, params={"key": self.api_key}, json=payload)
             return True
-        except Exception:
+        except:
             return False
 
     def send_telemetry(self, doc_id, data):
@@ -212,11 +205,26 @@ class FirebaseConnector:
                 collection, doc_id, data = item
                 url = f"https://firestore.googleapis.com/v1/projects/{self.project_id}/databases/(default)/documents/{collection}/{doc_id}"
                 
-                if 'drivers' in data: del data['drivers'] # Sécurité
-                
-                fields = {k: to_firestore_value(v) for k, v in data.items()}
+                # Sécurité: ne jamais écraser la liste des pilotes avec la télémétrie
+                if 'drivers' in data: del data['drivers']
+
+                # Conversion robuste
+                try:
+                    fields = {k: to_firestore_value(v) for k, v in data.items()}
+                except Exception as e:
+                    print(f"Erreur de conversion JSON: {e}")
+                    continue
+
                 payload = {"fields": fields}
-                try: self.http_session.patch(url, params={"key": self.api_key}, json=payload)
-                except Exception: pass
+                
+                try: 
+                    resp = self.http_session.patch(url, params={"key": self.api_key}, json=payload)
+                    if resp.status_code != 200:
+                        # Affichage de l'erreur détaillée pour comprendre pourquoi Firebase refuse
+                        print(f"⚠️ Rejet Firebase ({resp.status_code}): {resp.text}")
+                except Exception as e:
+                    print(f"Erreur Réseau: {e}")
+                
                 self.upload_queue.task_done()
-            except Exception: pass
+            except Exception as e:
+                print(f"Erreur Worker: {e}")
