@@ -25,7 +25,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import NamedTuple
 
-from ..const_common import ABS_ZERO_CELSIUS, MAX_SECONDS
+from const_common import ABS_ZERO_CELSIUS, MAX_SECONDS
 
 
 class WeatherNode(NamedTuple):

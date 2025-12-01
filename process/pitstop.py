@@ -22,8 +22,8 @@ Pit stop function
 
 from __future__ import annotations
 
-from ..const_common import EMPTY_DICT, PITEST_DEFAULT
-from ..regex_pattern import rex_number_extract
+from const_common import EMPTY_DICT, PITEST_DEFAULT
+from regex_pattern import rex_number_extract
 
 
 # Set state & counter

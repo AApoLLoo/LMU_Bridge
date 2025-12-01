@@ -25,8 +25,8 @@ from __future__ import annotations
 from itertools import islice
 from typing import Mapping
 
-from ..const_common import EMPTY_DICT, WHEELS_NA
-from ..regex_pattern import rex_number_extract
+from const_common import EMPTY_DICT, WHEELS_NA
+from regex_pattern import rex_number_extract
 
 
 def export_wheels(data: list) -> tuple[float, float, float, float]:

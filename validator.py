@@ -31,9 +31,10 @@ from math import isfinite
 from time import monotonic
 from typing import Any, Sequence
 
-from .const_common import MAX_SECONDS
-from .const_file import FileExt
-from .regex_pattern import CFG_INVALID_FILENAME, rex_hex_color
+# Imports absolus car exécuté depuis la racine
+from const_common import MAX_SECONDS
+from const_file import FileExt
+from regex_pattern import CFG_INVALID_FILENAME, rex_hex_color
 
 logger = logging.getLogger(__name__)
 
