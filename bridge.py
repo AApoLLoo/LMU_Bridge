@@ -6,16 +6,16 @@ import sys
 import os
 import queue
 
-# --- FIX IMPORT ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-# --- IMPORT DES CONNECTEURS ---
 try:
     from adapter.rf2_connector import RF2Info
+    # AJOUT : Import du connecteur REST
+    from adapter.restapi_connector import RestAPIInfo
     from adapter.rf2_data import (
-        TelemetryData, ScoringData, RulesData, ExtendedData, 
+        TelemetryData, ScoringData, RulesData, ExtendedData,
         PitInfoData, WeatherData, PitStrategyData, Vehicle
     )
     from adapter.supabase_connector import SupabaseConnector
@@ -23,22 +23,27 @@ except ImportError as e:
     print(f"Erreur d'import critique : {e}")
     sys.exit(1)
 
-# --- COULEURS & STYLE ---
 COLORS = {
     "bg": "#0f172a", "panel": "#1e293b", "input": "#334155",
-    "text": "#f8fafc", "accent": "#6366f1", "success": "#10b981", 
+    "text": "#f8fafc", "accent": "#6366f1", "success": "#10b981",
     "danger": "#ef4444", "warning": "#eab308", "debug": "#a855f7"
 }
 
-# --- UTILITAIRES ---
+
 def normalize_id(name):
-    """Transforme le nom en ID compatible (minuscules, sans espaces spéciaux)"""
     import re
-    # Remplace tout ce qui n'est pas alphanumérique par un tiret
     safe = re.sub(r'[^a-zA-Z0-9]+', '-', name).strip('-').lower()
     return safe
 
-# --- LOGIQUE MÉTIER ---
+
+# --- MOCK POUR REST API ---
+# RestAPIInfo a besoin d'un objet parent avec ces attributs
+class MockParentAPI:
+    def __init__(self):
+        self.identifier = "LMU"  # Important pour cibler LMU
+        self.isActive = True
+
+
 class BridgeLogic:
     def __init__(self, log_callback, status_callback):
         self.log = log_callback
@@ -47,9 +52,10 @@ class BridgeLogic:
         self.debug_mode = False
         self.fb = None
         self.rf2_info = None
+        self.rest_info = None  # AJOUT
         self.thread = None
-        self.line_up_name = "" # Nom affiché
-        self.team_id = ""      # ID technique (normalisé)
+        self.line_up_name = ""
+        self.team_id = ""
         self.driver_pseudo = ""
 
     def set_debug(self, enabled):
@@ -57,9 +63,9 @@ class BridgeLogic:
         state = "ACTIVÉ" if enabled else "DÉSACTIVÉ"
         self.log(f"🔧 Mode Debug {state}")
 
-    def connect_db(self):  # Renommé de connect_firebase
+    def connect_db(self):
         try:
-            self.fb = SupabaseConnector()  # Plus d'arguments project_id
+            self.fb = SupabaseConnector()
             return True
         except Exception as e:
             self.log(f"❌ Erreur Connexion DB: {e}")
@@ -67,33 +73,39 @@ class BridgeLogic:
 
     def check_team(self, name):
         if not self.fb: self.connect_db()
-        # On utilise l'ID normalisé pour vérifier
         return self.fb.get_team_info("strategies", normalize_id(name))
 
     def create_team(self, name, category, drivers):
         if not self.fb: self.connect_db()
-        # Création avec l'ID normalisé
         return self.fb.create_team("strategies", normalize_id(name), category, drivers)
 
     def start_loop(self, line_up_name, driver_pseudo):
         self.line_up_name = line_up_name
-        self.team_id = normalize_id(line_up_name) # Normalisation cruciale ici
+        self.team_id = normalize_id(line_up_name)
         self.driver_pseudo = driver_pseudo
         self.running = True
-        
+
         if self.fb:
-            # On s'enregistre sur l'ID normalisé
             self.fb.register_driver_if_new("strategies", self.team_id, driver_pseudo)
             self.fb.start()
-        
+
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
     def stop(self):
         self.running = False
-        if self.rf2_info: 
-            try: self.rf2_info.stop()
-            except: pass
+        if self.rf2_info:
+            try:
+                self.rf2_info.stop()
+            except:
+                pass
+        # AJOUT : Arrêt propre du REST
+        if self.rest_info:
+            try:
+                self.rest_info.stop()
+            except:
+                pass
+
         if self.fb: self.fb.stop()
         if self.thread: self.thread.join(timeout=1.0)
         self.set_status("STOPPED", COLORS["danger"])
@@ -104,11 +116,31 @@ class BridgeLogic:
         self.set_status("WAITING GAME...", COLORS["warning"])
 
         pit_strategy = PitStrategyData(port=6397)
+
+        # Init REST API avec configuration LMU par défaut
+        mock_parent = MockParentAPI()
+        self.rest_info = RestAPIInfo(mock_parent)
+        # Configuration standard LMU (Port 9000 pour le REST API)
+        self.rest_info.setConnection({
+            "url_host": "localhost",
+            "url_port_lmu": 6937,
+            "connection_timeout": 1.0,
+            "connection_retry": 3,
+            "connection_retry_delay": 2,
+            "restapi_update_interval": 200,
+            "enable_restapi_access": True,
+            "enable_weather_info": True,
+            "enable_session_info": True,
+            "enable_garage_setup_info": True,
+            "enable_vehicle_info": True,
+            "enable_energy_remaining": True,
+        })
+
         telemetry = scoring = rules = extended = pit_info = weather = vehicle_helper = None
-        
+
         last_game_check = 0
         last_update_time = 0
-        UPDATE_RATE = 0.1
+        UPDATE_RATE = 0.05  # 20Hz pour fluidité
 
         while self.running:
             current_time = time.time()
@@ -119,18 +151,23 @@ class BridgeLogic:
                     try:
                         self.rf2_info = RF2Info()
                         self.rf2_info.start()
-                        
-                        self.log("🎮 Jeu détecté ! Capteurs actifs.")
+
+                        # Démarrage du thread REST API
+                        self.rest_info.start()
+
+                        self.log("🎮 Jeu détecté ! Capteurs & REST API actifs.")
                         self.set_status("CONNECTED", COLORS["success"])
-                        
-                        telemetry = TelemetryData(self.rf2_info)
+
+                        # On passe self.rest_info aux datas
+                        telemetry = TelemetryData(self.rf2_info, self.rest_info)  # <--- MODIFIE
                         scoring = ScoringData(self.rf2_info)
                         rules = RulesData(self.rf2_info)
                         extended = ExtendedData(self.rf2_info)
                         pit_info = PitInfoData(self.rf2_info)
                         weather = WeatherData(self.rf2_info)
                         vehicle_helper = Vehicle(self.rf2_info)
-                    except Exception:
+                    except Exception as e:
+                        print(f"Erreur init modules: {e}")
                         pass
                     last_game_check = current_time
                 time.sleep(0.1)
@@ -145,7 +182,6 @@ class BridgeLogic:
                     game_driver = status['driver_name']
 
                     payload = {
-                        "timestamp": current_time,
                         "driverName": game_driver,
                         "activeDriverId": self.driver_pseudo,
                         "telemetry": {
@@ -153,6 +189,7 @@ class BridgeLogic:
                             "rpm": telemetry.rpm(idx),
                             "speed": vehicle_helper.speed(idx),
                             "fuel": telemetry.fuel_level(idx),
+                            "fuelCapacity": telemetry.fuel_capacity(idx),  # Ajout utile
                             "inputs": {
                                 "thr": telemetry.input_throttle(idx),
                                 "brk": telemetry.input_brake(idx),
@@ -164,15 +201,14 @@ class BridgeLogic:
                                 "water": telemetry.temp_water(idx)
                             },
                             "tires": {
-                                # Envoi du dictionnaire complet (Compatible Firestore avec mon fix firebase_connector)
-                                "temp": telemetry.tire_temps(idx), 
+                                "temp": telemetry.tire_temps(idx),
                                 "press": telemetry.tire_pressure(idx),
                                 "wear": telemetry.tire_wear(idx),
                                 "type": telemetry.surface_type(idx),
                                 "brake_temp": telemetry.brake_temp(idx)
                             },
-                            "damage": telemetry.dents(idx),
                             "electric": telemetry.electric_data(idx),
+                            # Récupération de la VRAIE énergie virtuelle via REST
                             "virtual_energy": telemetry.virtual_energy(idx),
                             "max_virtual_energy": telemetry.max_virtual_energy(idx)
                         },
@@ -199,31 +235,33 @@ class BridgeLogic:
                         }
                     }
 
-                    # ENVOI SUR L'ID NORMALISÉ
                     self.fb.send_telemetry(self.team_id, payload)
                     last_update_time = current_time
                     self.set_status(f"SENDING ({game_driver})", COLORS["accent"])
 
                     if self.debug_mode:
                         t = payload["telemetry"]
-                        s = payload["scoring"]
-                        cat = scoring.get_vehicle_scoring(idx).get("class")
-                        self.log(f"📤 [TX] weather : {s['weather']}| carCategory: {cat} RPM: {t['rpm']:.0f}")
-                
+                        self.log(f"📤 VE: {t['virtual_energy']:.1f}% | Fuel: {t['fuel']:.1f}L")
+
                 elif not status['is_driving']:
                     self.set_status("IDLE (NOT DRIVING)", "#94a3b8")
                     time.sleep(0.5)
 
             except Exception as e:
                 self.log(f"⚠️ Erreur boucle: {e}")
-                try: self.rf2_info.stop()
-                except: pass
+                # En cas de crash, on nettoie
+                try:
+                    self.rf2_info.stop()
+                    self.rest_info.stop()
+                except:
+                    pass
                 self.rf2_info = None
                 self.set_status("DISCONNECTED", COLORS["danger"])
 
             time.sleep(0.01)
 
-# --- INTERFACE UI (Même code qu'avant) ---
+
+# ... (Classe BridgeApp identique à avant)
 class BridgeApp:
     def __init__(self, root):
         self.root = root
@@ -239,36 +277,44 @@ class BridgeApp:
         header_frame = tk.Frame(root, bg=COLORS["bg"])
         header_frame.pack(pady=20)
         tk.Label(header_frame, text="LE MANS", font=("Segoe UI", 24, "bold italic"), bg=COLORS["bg"], fg="white").pack()
-        tk.Label(header_frame, text="STRATEGY BRIDGE", font=("Segoe UI", 10, "bold"), bg=COLORS["bg"], fg=COLORS["accent"]).pack()
+        tk.Label(header_frame, text="STRATEGY BRIDGE", font=("Segoe UI", 10, "bold"), bg=COLORS["bg"],
+                 fg=COLORS["accent"]).pack()
 
         form_frame = tk.Frame(root, bg=COLORS["panel"], padx=20, pady=20)
         form_frame.pack(padx=30, fill="x", pady=10)
 
-        tk.Label(form_frame, text="NOM DE LA LINE UP (ID)", bg=COLORS["panel"], fg="#94a3b8", font=("Segoe UI", 8, "bold")).pack(anchor="w")
-        self.ent_lineup = tk.Entry(form_frame, bg=COLORS["input"], fg="white", font=("Segoe UI", 12), relief="flat", insertbackground="white")
+        tk.Label(form_frame, text="NOM DE LA LINE UP (ID)", bg=COLORS["panel"], fg="#94a3b8",
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        self.ent_lineup = tk.Entry(form_frame, bg=COLORS["input"], fg="white", font=("Segoe UI", 12), relief="flat",
+                                   insertbackground="white")
         self.ent_lineup.pack(fill="x", pady=(5, 15), ipady=5)
 
-        tk.Label(form_frame, text="VOTRE PSEUDO", bg=COLORS["panel"], fg="#94a3b8", font=("Segoe UI", 8, "bold")).pack(anchor="w")
-        self.ent_pseudo = tk.Entry(form_frame, bg=COLORS["input"], fg="white", font=("Segoe UI", 12), relief="flat", insertbackground="white")
+        tk.Label(form_frame, text="VOTRE PSEUDO", bg=COLORS["panel"], fg="#94a3b8", font=("Segoe UI", 8, "bold")).pack(
+            anchor="w")
+        self.ent_pseudo = tk.Entry(form_frame, bg=COLORS["input"], fg="white", font=("Segoe UI", 12), relief="flat",
+                                   insertbackground="white")
         self.ent_pseudo.pack(fill="x", pady=(5, 20), ipady=5)
 
-        self.btn_start = tk.Button(form_frame, text="CONNEXION", bg=COLORS["accent"], fg="white", font=("Segoe UI", 11, "bold"), relief="flat", cursor="hand2", command=self.on_start)
+        self.btn_start = tk.Button(form_frame, text="CONNEXION", bg=COLORS["accent"], fg="white",
+                                   font=("Segoe UI", 11, "bold"), relief="flat", cursor="hand2", command=self.on_start)
         self.btn_start.pack(fill="x", ipady=8)
 
-        self.btn_stop = tk.Button(form_frame, text="DÉCONNEXION", bg=COLORS["danger"], fg="white", font=("Segoe UI", 11, "bold"), relief="flat", cursor="hand2", command=self.on_stop)
+        self.btn_stop = tk.Button(form_frame, text="DÉCONNEXION", bg=COLORS["danger"], fg="white",
+                                  font=("Segoe UI", 11, "bold"), relief="flat", cursor="hand2", command=self.on_stop)
 
         self.lbl_status = tk.Label(root, text="READY", bg=COLORS["bg"], fg="#94a3b8", font=("Consolas", 10, "bold"))
         self.lbl_status.pack(pady=5)
 
         self.var_debug = tk.BooleanVar(value=False)
-        self.chk_debug = tk.Checkbutton(root, text="Afficher les données transmises (Debug)", 
+        self.chk_debug = tk.Checkbutton(root, text="Afficher les données transmises (Debug)",
                                         variable=self.var_debug, bg=COLORS["bg"], fg="#94a3b8",
                                         selectcolor=COLORS["panel"], activebackground=COLORS["bg"],
                                         activeforeground="white", font=("Segoe UI", 9),
                                         command=self.toggle_debug)
         self.chk_debug.pack(pady=0)
 
-        self.txt_log = scrolledtext.ScrolledText(root, bg="#020408", fg="#22c55e", font=("Consolas", 9), height=12, relief="flat")
+        self.txt_log = scrolledtext.ScrolledText(root, bg="#020408", fg="#22c55e", font=("Consolas", 9), height=12,
+                                                 relief="flat")
         self.txt_log.pack(fill="both", expand=True, padx=30, pady=(10, 30))
         self.txt_log.config(state=tk.DISABLED)
 
@@ -314,9 +360,10 @@ class BridgeApp:
         dialog.transient(self.root)
         dialog.grab_set()
 
-        tk.Label(dialog, text=f"La Line Up '{lineup}' n'existe pas.", bg=COLORS["panel"], fg="white", font=("Segoe UI", 10)).pack(pady=10)
+        tk.Label(dialog, text=f"La Line Up '{lineup}' n'existe pas.", bg=COLORS["panel"], fg="white",
+                 font=("Segoe UI", 10)).pack(pady=10)
         tk.Label(dialog, text="Catégorie :", bg=COLORS["panel"], fg="#94a3b8").pack()
-        
+
         cats = ["Hypercar", "LMP2", "LMP2 (ELMS)", "LMP3", "GT3"]
         combo_cat = ttk.Combobox(dialog, values=cats, state="readonly")
         combo_cat.current(0)
@@ -339,7 +386,8 @@ class BridgeApp:
                 messagebox.showerror("Erreur", "Échec création.")
                 self._activate_ui(False)
 
-        tk.Button(dialog, text="CRÉER & REJOINDRE", bg=COLORS["success"], fg="white", font=("Segoe UI", 10, "bold"), command=confirm_create, relief="flat").pack(pady=20, ipadx=10)
+        tk.Button(dialog, text="CRÉER & REJOINDRE", bg=COLORS["success"], fg="white", font=("Segoe UI", 10, "bold"),
+                  command=confirm_create, relief="flat").pack(pady=20, ipadx=10)
 
     def _activate_ui(self, active):
         if active:
@@ -358,6 +406,7 @@ class BridgeApp:
     def on_stop(self):
         self.logic.stop()
         self._activate_ui(False)
+
 
 if __name__ == "__main__":
     root = tk.Tk()

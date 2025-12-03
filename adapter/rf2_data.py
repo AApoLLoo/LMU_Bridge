@@ -8,17 +8,16 @@ from validator import infnan_to_zero as rmnan
 from adapter import rf2_connector
 from process.pitstop import EstimatePitTime
 
-# --- FIX: Fonction pour convertir les bytes en int ---
 def safe_int(v):
-    """Convertit bytes, bool ou int en int natif pour JSON"""
     if isinstance(v, bytes):
         return int.from_bytes(v, "little")
     return int(v)
 
 class DataAdapter:
-    __slots__ = ("shmm",)
-    def __init__(self, shmm: rf2_connector.RF2Info) -> None:
+    __slots__ = ("shmm", "rest")
+    def __init__(self, shmm: rf2_connector.RF2Info, rest=None) -> None:
         self.shmm = shmm
+        self.rest = rest
 
 class TelemetryData(DataAdapter):
     __slots__ = ()
@@ -41,13 +40,27 @@ class TelemetryData(DataAdapter):
     def downforce_front(self, index: int | None = None) -> float: return rmnan(self.shmm.rf2TeleVeh(index).mFrontDownforce)
     def downforce_rear(self, index: int | None = None) -> float: return rmnan(self.shmm.rf2TeleVeh(index).mRearDownforce)
 
-    # --- GESTION DE L'ENERGIE VIRTUELLE ---
     def virtual_energy(self, index: int | None = None) -> float:
+        # On essaie de lire via l'API REST
+        if self.rest:
+            try:
+                # Lecture des attributs bruts (en Joules probablement)
+                curr = getattr(self.rest.telemetry, 'currentVirtualEnergy', 0.0)
+                maxn = getattr(self.rest.telemetry, 'maxVirtualEnergy', 0.0)
+                # Conversion en pourcentage
+                if maxn is not None and float(maxn) > 0:
+                    return (float(curr) / float(maxn)) * 100.0
+                # Si pas de max mais une valeur courante (cas rare), on renvoie tel quel
+                if curr is not None:
+                    return float(curr)
+            except:
+                pass
+
+        # Si échec, 0.0
         return 0.0
 
     def max_virtual_energy(self, index: int | None = None) -> float:
-        return 0.0
-    # --------------------------------------
+        return 100.0
 
     def local_velocity(self, index: int | None = None) -> tuple[float, float, float]:
         vel = self.shmm.rf2TeleVeh(index).mLocalVel
@@ -65,11 +78,10 @@ class TelemetryData(DataAdapter):
     def tire_pressure(self, index: int | None = None) -> list[float]: return [rmnan(w.mPressure) for w in self.shmm.rf2TeleVeh(index).mWheels]
     def tire_wear(self, index: int | None = None) -> list[float]: return [rmnan(w.mWear) for w in self.shmm.rf2TeleVeh(index).mWheels]
     def brake_temp(self, index: int | None = None) -> list[float]: return [rmnan(w.mBrakeTemp) - 273.15 for w in self.shmm.rf2TeleVeh(index).mWheels]
-    # FIX: safe_int sur les types de surface
+
     def surface_type(self, index: int | None = None) -> list[int]: return [safe_int(w.mSurfaceType) for w in self.shmm.rf2TeleVeh(index).mWheels]
     def wheel_detached(self, index: int | None = None) -> list[bool]: return [bool(w.mDetached) for w in self.shmm.rf2TeleVeh(index).mWheels]
     def tire_flat(self, index: int | None = None) -> list[bool]: return [bool(w.mFlat) for w in self.shmm.rf2TeleVeh(index).mWheels]
-    # FIX: safe_int sur les dégâts
     def dents(self, index: int | None = None) -> list[int]: return [safe_int(x) for x in self.shmm.rf2TeleVeh(index).mDentSeverity]
     def overheating(self, index: int | None = None) -> bool: return bool(self.shmm.rf2TeleVeh(index).mOverheating)
 
@@ -81,13 +93,12 @@ class TelemetryData(DataAdapter):
             "rpm": rmnan(veh.mElectricBoostMotorRPM),
             "temp_motor": rmnan(veh.mElectricBoostMotorTemperature),
             "temp_water": rmnan(veh.mElectricBoostWaterTemperature),
-            "state": safe_int(veh.mElectricBoostMotorState) # FIX: safe_int
+            "state": safe_int(veh.mElectricBoostMotorState)
         }
 
 class ScoringData(DataAdapter):
     __slots__ = ()
     def track_name(self) -> str: return tostr(self.shmm.rf2ScorInfo.mTrackName)
-    # FIX: safe_int sur mSession et mGamePhase
     def session_type(self) -> int: return safe_int(self.shmm.rf2ScorInfo.mSession)
     def time_info(self) -> dict:
         info = self.shmm.rf2ScorInfo
@@ -95,7 +106,6 @@ class ScoringData(DataAdapter):
     def game_phase(self) -> int: return safe_int(self.shmm.rf2ScorInfo.mGamePhase)
     def flag_state(self) -> dict:
         info = self.shmm.rf2ScorInfo
-        # FIX: safe_int sur les flags et list comprehension pour sector_flags
         return {
             "yellow_global": safe_int(info.mYellowFlagState),
             "sector_flags": [safe_int(x) for x in info.mSectorFlag],
@@ -107,7 +117,6 @@ class ScoringData(DataAdapter):
     def vehicle_count(self) -> int: return self.shmm.rf2ScorInfo.mNumVehicles
     def get_vehicle_scoring(self, index: int) -> dict:
         veh = self.shmm.rf2ScorVeh(index)
-        # FIX: utilisation de safe_int pour la clé du map et les status
         sector_map = {0: 3, 1: 1, 2: 2}
         return {
             "id": veh.mID,
@@ -135,17 +144,14 @@ class RulesData(DataAdapter):
     __slots__ = ()
     def sc_info(self) -> dict:
         rules = self.shmm.Rf2Rules.mTrackRules
-        # FIX: safe_int
         return {"active": safe_int(rules.mSafetyCarActive), "laps": safe_int(rules.mSafetyCarLaps), "instruction": rules.mSafetyCarInstruction}
     def yellow_flag(self) -> dict:
         rules = self.shmm.Rf2Rules.mTrackRules
-        # FIX: safe_int
         return {"detected": safe_int(rules.mYellowFlagDetected), "state": safe_int(rules.mYellowFlagState), "laps": safe_int(rules.mYellowFlagLaps)}
     def message(self) -> str: return tostr(self.shmm.Rf2Rules.mTrackRules.mMessage)
     def participant_status(self, index: int) -> dict:
         if index >= 128: return {}
         part = self.shmm.Rf2Rules.mParticipants[index]
-        # FIX: safe_int
         return {"id": part.mID, "frozen_order": safe_int(part.mFrozenOrder), "yellow_severity": rmnan(part.mYellowSeverity), "relative_laps": rmnan(part.mRelativeLaps), "pits_open": safe_int(part.mPitsOpen), "message": tostr(part.mMessage)}
 
 class ExtendedData(DataAdapter):
@@ -186,7 +192,8 @@ class Vehicle(DataAdapter):
     __slots__ = ()
     def speed(self, index: int | None = None) -> float:
         vel = self.shmm.rf2TeleVeh(index).mLocalVel
-        return ((vel.x**2 + vel.y**2 + vel.z**2)**0.5)*3.6
+        speed_ms = (vel.x**2 + vel.y**2 + vel.z**2)**0.5
+        return speed_ms * 3.6
     def aero_damage(self, index: int | None = None) -> float: return 0.0
     def get_local_driver_status(self) -> dict:
         player_idx = 0; found = False
@@ -195,6 +202,5 @@ class Vehicle(DataAdapter):
                 player_idx = i; found = True; break
         if not found: return {"is_driving": False, "driver_name": "Unknown"}
         scor_veh = self.shmm.rf2ScorVeh(player_idx)
-        # FIX: safe_int
         is_driving = (safe_int(scor_veh.mIsPlayer) == 1 and safe_int(scor_veh.mControl) == 0 and safe_int(self.shmm.rf2ScorInfo.mInRealtime) == 1)
         return {"is_driving": is_driving, "driver_name": tostr(scor_veh.mDriverName), "vehicle_index": player_idx}
