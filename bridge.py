@@ -108,7 +108,7 @@ class BridgeLogic:
         
         last_game_check = 0
         last_update_time = 0
-        UPDATE_RATE = 0.5
+        UPDATE_RATE = 0.1
 
         while self.running:
             current_time = time.time()
@@ -208,7 +208,7 @@ class BridgeLogic:
                         t = payload["telemetry"]
                         s = payload["scoring"]
                         cat = scoring.get_vehicle_scoring(idx).get("class")
-                        self.log(f"📤 [TX] Fuel: {t['fuel']:.1f}L | Nrg:{t['virtual_energy']:.1f} | Electric : {t['electric']} | carCategory: {cat} RPM: {t['rpm']:.0f}")
+                        self.log(f"📤 [TX] weather : {s['weather']}| carCategory: {cat} RPM: {t['rpm']:.0f}")
                 
                 elif not status['is_driving']:
                     self.set_status("IDLE (NOT DRIVING)", "#94a3b8")

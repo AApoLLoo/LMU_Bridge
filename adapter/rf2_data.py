@@ -186,7 +186,7 @@ class Vehicle(DataAdapter):
     __slots__ = ()
     def speed(self, index: int | None = None) -> float:
         vel = self.shmm.rf2TeleVeh(index).mLocalVel
-        return (vel.x**2 + vel.y**2 + vel.z**2)**0.5
+        return ((vel.x**2 + vel.y**2 + vel.z**2)**0.5)*3.6
     def aero_damage(self, index: int | None = None) -> float: return 0.0
     def get_local_driver_status(self) -> dict:
         player_idx = 0; found = False
