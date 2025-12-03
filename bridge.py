@@ -18,7 +18,7 @@ try:
         TelemetryData, ScoringData, RulesData, ExtendedData, 
         PitInfoData, WeatherData, PitStrategyData, Vehicle
     )
-    from adapter.firebase_connector import FirebaseConnector
+    from adapter.supabase_connector import SupabaseConnector
 except ImportError as e:
     print(f"Erreur d'import critique : {e}")
     sys.exit(1)
@@ -57,21 +57,21 @@ class BridgeLogic:
         state = "ACTIVÉ" if enabled else "DÉSACTIVÉ"
         self.log(f"🔧 Mode Debug {state}")
 
-    def connect_firebase(self):
+    def connect_db(self):  # Renommé de connect_firebase
         try:
-            self.fb = FirebaseConnector(project_id="le-mans-strat")
+            self.fb = SupabaseConnector()  # Plus d'arguments project_id
             return True
         except Exception as e:
-            self.log(f"❌ Erreur Firebase: {e}")
+            self.log(f"❌ Erreur Connexion DB: {e}")
             return False
 
     def check_team(self, name):
-        if not self.fb: self.connect_firebase()
+        if not self.fb: self.connect_db()
         # On utilise l'ID normalisé pour vérifier
         return self.fb.get_team_info("strategies", normalize_id(name))
 
     def create_team(self, name, category, drivers):
-        if not self.fb: self.connect_firebase()
+        if not self.fb: self.connect_db()
         # Création avec l'ID normalisé
         return self.fb.create_team("strategies", normalize_id(name), category, drivers)
 
@@ -168,10 +168,13 @@ class BridgeLogic:
                                 "temp": telemetry.tire_temps(idx), 
                                 "press": telemetry.tire_pressure(idx),
                                 "wear": telemetry.tire_wear(idx),
-                                "type": telemetry.surface_type(idx)
+                                "type": telemetry.surface_type(idx),
+                                "brake_temp": telemetry.brake_temp(idx)
                             },
                             "damage": telemetry.dents(idx),
-                            "electric": telemetry.electric_data(idx)
+                            "electric": telemetry.electric_data(idx),
+                            "virtual_energy": telemetry.virtual_energy(idx),
+                            "max_virtual_energy": telemetry.max_virtual_energy(idx)
                         },
                         "scoring": {
                             "track": scoring.track_name(),
@@ -203,7 +206,9 @@ class BridgeLogic:
 
                     if self.debug_mode:
                         t = payload["telemetry"]
-                        self.log(f"📤 [TX] Fuel: {t['fuel']:.1f}L | RPM: {t['rpm']:.0f}")
+                        s = payload["scoring"]
+                        cat = scoring.get_vehicle_scoring(idx).get("class")
+                        self.log(f"📤 [TX] Fuel: {t['fuel']:.1f}L | Nrg:{t['virtual_energy']:.1f} | Electric : {t['electric']} | carCategory: {cat} RPM: {t['rpm']:.0f}")
                 
                 elif not status['is_driving']:
                     self.set_status("IDLE (NOT DRIVING)", "#94a3b8")

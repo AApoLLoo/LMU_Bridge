@@ -8,6 +8,13 @@ from validator import infnan_to_zero as rmnan
 from adapter import rf2_connector
 from process.pitstop import EstimatePitTime
 
+# --- FIX: Fonction pour convertir les bytes en int ---
+def safe_int(v):
+    """Convertit bytes, bool ou int en int natif pour JSON"""
+    if isinstance(v, bytes):
+        return int.from_bytes(v, "little")
+    return int(v)
+
 class DataAdapter:
     __slots__ = ("shmm",)
     def __init__(self, shmm: rf2_connector.RF2Info) -> None:
@@ -33,11 +40,19 @@ class TelemetryData(DataAdapter):
     def wing_front(self, index: int | None = None) -> float: return rmnan(self.shmm.rf2TeleVeh(index).mFrontWingHeight)
     def downforce_front(self, index: int | None = None) -> float: return rmnan(self.shmm.rf2TeleVeh(index).mFrontDownforce)
     def downforce_rear(self, index: int | None = None) -> float: return rmnan(self.shmm.rf2TeleVeh(index).mRearDownforce)
-    def local_velocity(self, index: int | None = None) -> tuple[float, float, float]: 
+
+    # --- GESTION DE L'ENERGIE VIRTUELLE ---
+    def virtual_energy(self, index: int | None = None) -> float:
+        return 0.0
+
+    def max_virtual_energy(self, index: int | None = None) -> float:
+        return 0.0
+    # --------------------------------------
+
+    def local_velocity(self, index: int | None = None) -> tuple[float, float, float]:
         vel = self.shmm.rf2TeleVeh(index).mLocalVel
         return rmnan(vel.x), rmnan(vel.y), rmnan(vel.z)
 
-    # --- CORRECTION FORMAT DICTIONNAIRE ---
     def tire_temps(self, index: int | None = None) -> dict:
         wheels = self.shmm.rf2TeleVeh(index).mWheels
         return {
@@ -50,49 +65,88 @@ class TelemetryData(DataAdapter):
     def tire_pressure(self, index: int | None = None) -> list[float]: return [rmnan(w.mPressure) for w in self.shmm.rf2TeleVeh(index).mWheels]
     def tire_wear(self, index: int | None = None) -> list[float]: return [rmnan(w.mWear) for w in self.shmm.rf2TeleVeh(index).mWheels]
     def brake_temp(self, index: int | None = None) -> list[float]: return [rmnan(w.mBrakeTemp) - 273.15 for w in self.shmm.rf2TeleVeh(index).mWheels]
-    def surface_type(self, index: int | None = None) -> list[int]: return [w.mSurfaceType for w in self.shmm.rf2TeleVeh(index).mWheels]
-    def wheel_detached(self, index: int | None = None) -> list[bool]: return [w.mDetached for w in self.shmm.rf2TeleVeh(index).mWheels]
-    def tire_flat(self, index: int | None = None) -> list[bool]: return [w.mFlat for w in self.shmm.rf2TeleVeh(index).mWheels]
-    def dents(self, index: int | None = None) -> list[int]: return list(self.shmm.rf2TeleVeh(index).mDentSeverity)
-    def overheating(self, index: int | None = None) -> bool: return self.shmm.rf2TeleVeh(index).mOverheating
+    # FIX: safe_int sur les types de surface
+    def surface_type(self, index: int | None = None) -> list[int]: return [safe_int(w.mSurfaceType) for w in self.shmm.rf2TeleVeh(index).mWheels]
+    def wheel_detached(self, index: int | None = None) -> list[bool]: return [bool(w.mDetached) for w in self.shmm.rf2TeleVeh(index).mWheels]
+    def tire_flat(self, index: int | None = None) -> list[bool]: return [bool(w.mFlat) for w in self.shmm.rf2TeleVeh(index).mWheels]
+    # FIX: safe_int sur les dégâts
+    def dents(self, index: int | None = None) -> list[int]: return [safe_int(x) for x in self.shmm.rf2TeleVeh(index).mDentSeverity]
+    def overheating(self, index: int | None = None) -> bool: return bool(self.shmm.rf2TeleVeh(index).mOverheating)
+
     def electric_data(self, index: int | None = None) -> dict:
         veh = self.shmm.rf2TeleVeh(index)
-        return {"charge": rmnan(veh.mBatteryChargeFraction), "torque": rmnan(veh.mElectricBoostMotorTorque), "rpm": rmnan(veh.mElectricBoostMotorRPM), "temp_motor": rmnan(veh.mElectricBoostMotorTemperature), "temp_water": rmnan(veh.mElectricBoostWaterTemperature), "state": veh.mElectricBoostMotorState}
+        return {
+            "charge": rmnan(veh.mBatteryChargeFraction),
+            "torque": rmnan(veh.mElectricBoostMotorTorque),
+            "rpm": rmnan(veh.mElectricBoostMotorRPM),
+            "temp_motor": rmnan(veh.mElectricBoostMotorTemperature),
+            "temp_water": rmnan(veh.mElectricBoostWaterTemperature),
+            "state": safe_int(veh.mElectricBoostMotorState) # FIX: safe_int
+        }
 
-# ... (Reste du fichier identique à la version précédente)
 class ScoringData(DataAdapter):
     __slots__ = ()
     def track_name(self) -> str: return tostr(self.shmm.rf2ScorInfo.mTrackName)
-    def session_type(self) -> int: return self.shmm.rf2ScorInfo.mSession
+    # FIX: safe_int sur mSession et mGamePhase
+    def session_type(self) -> int: return safe_int(self.shmm.rf2ScorInfo.mSession)
     def time_info(self) -> dict:
         info = self.shmm.rf2ScorInfo
         return {"current": rmnan(info.mCurrentET), "end": rmnan(info.mEndET), "max_laps": info.mMaxLaps}
-    def game_phase(self) -> int: return self.shmm.rf2ScorInfo.mGamePhase
+    def game_phase(self) -> int: return safe_int(self.shmm.rf2ScorInfo.mGamePhase)
     def flag_state(self) -> dict:
         info = self.shmm.rf2ScorInfo
-        return {"yellow_global": info.mYellowFlagState, "sector_flags": list(info.mSectorFlag), "in_realtime": info.mInRealtime}
+        # FIX: safe_int sur les flags et list comprehension pour sector_flags
+        return {
+            "yellow_global": safe_int(info.mYellowFlagState),
+            "sector_flags": [safe_int(x) for x in info.mSectorFlag],
+            "in_realtime": safe_int(info.mInRealtime)
+        }
     def weather_env(self) -> dict:
         info = self.shmm.rf2ScorInfo
         return {"ambient_temp": rmnan(info.mAmbientTemp), "track_temp": rmnan(info.mTrackTemp), "rain": rmnan(info.mRaining), "darkness": rmnan(info.mDarkCloud), "wetness_path": (rmnan(info.mMinPathWetness), rmnan(info.mMaxPathWetness)), "wind_speed": rmnan((info.mWind.x**2 + info.mWind.y**2 + info.mWind.z**2)**0.5)}
     def vehicle_count(self) -> int: return self.shmm.rf2ScorInfo.mNumVehicles
     def get_vehicle_scoring(self, index: int) -> dict:
         veh = self.shmm.rf2ScorVeh(index)
-        sector_map = {0: 3, 1: 1, 2: 2} 
-        return {"id": veh.mID, "driver": tostr(veh.mDriverName), "vehicle": tostr(veh.mVehicleName), "class": tostr(veh.mVehicleClass), "position": veh.mPlace, "is_player": veh.mIsPlayer, "laps": veh.mTotalLaps, "sector": sector_map.get(veh.mSector, 0), "status": veh.mFinishStatus, "in_pits": veh.mInPits, "pit_stops": veh.mNumPitstops, "penalties": veh.mNumPenalties, "lap_dist": rmnan(veh.mLapDist), "best_lap": rmnan(veh.mBestLapTime), "last_lap": rmnan(veh.mLastLapTime), "sectors_best": (rmnan(veh.mBestSector1), rmnan(veh.mBestSector2)), "sectors_cur": (rmnan(veh.mCurSector1), rmnan(veh.mCurSector2)), "gap_leader": rmnan(veh.mTimeBehindLeader), "gap_next": rmnan(veh.mTimeBehindNext)}
+        # FIX: utilisation de safe_int pour la clé du map et les status
+        sector_map = {0: 3, 1: 1, 2: 2}
+        return {
+            "id": veh.mID,
+            "driver": tostr(veh.mDriverName),
+            "vehicle": tostr(veh.mVehicleName),
+            "class": tostr(veh.mVehicleClass),
+            "position": safe_int(veh.mPlace),
+            "is_player": safe_int(veh.mIsPlayer),
+            "laps": veh.mTotalLaps,
+            "sector": sector_map.get(safe_int(veh.mSector), 0),
+            "status": safe_int(veh.mFinishStatus),
+            "in_pits": safe_int(veh.mInPits),
+            "pit_stops": safe_int(veh.mNumPitstops),
+            "penalties": safe_int(veh.mNumPenalties),
+            "lap_dist": rmnan(veh.mLapDist),
+            "best_lap": rmnan(veh.mBestLapTime),
+            "last_lap": rmnan(veh.mLastLapTime),
+            "sectors_best": (rmnan(veh.mBestSector1), rmnan(veh.mBestSector2)),
+            "sectors_cur": (rmnan(veh.mCurSector1), rmnan(veh.mCurSector2)),
+            "gap_leader": rmnan(veh.mTimeBehindLeader),
+            "gap_next": rmnan(veh.mTimeBehindNext)
+        }
 
 class RulesData(DataAdapter):
     __slots__ = ()
     def sc_info(self) -> dict:
         rules = self.shmm.Rf2Rules.mTrackRules
-        return {"active": rules.mSafetyCarActive, "laps": rules.mSafetyCarLaps, "instruction": rules.mSafetyCarInstruction}
+        # FIX: safe_int
+        return {"active": safe_int(rules.mSafetyCarActive), "laps": safe_int(rules.mSafetyCarLaps), "instruction": rules.mSafetyCarInstruction}
     def yellow_flag(self) -> dict:
         rules = self.shmm.Rf2Rules.mTrackRules
-        return {"detected": rules.mYellowFlagDetected, "state": rules.mYellowFlagState, "laps": rules.mYellowFlagLaps}
+        # FIX: safe_int
+        return {"detected": safe_int(rules.mYellowFlagDetected), "state": safe_int(rules.mYellowFlagState), "laps": safe_int(rules.mYellowFlagLaps)}
     def message(self) -> str: return tostr(self.shmm.Rf2Rules.mTrackRules.mMessage)
     def participant_status(self, index: int) -> dict:
         if index >= 128: return {}
         part = self.shmm.Rf2Rules.mParticipants[index]
-        return {"id": part.mID, "frozen_order": part.mFrozenOrder, "yellow_severity": rmnan(part.mYellowSeverity), "relative_laps": part.mRelativeLaps, "pits_open": part.mPitsOpen, "message": tostr(part.mMessage)}
+        # FIX: safe_int
+        return {"id": part.mID, "frozen_order": safe_int(part.mFrozenOrder), "yellow_severity": rmnan(part.mYellowSeverity), "relative_laps": rmnan(part.mRelativeLaps), "pits_open": safe_int(part.mPitsOpen), "message": tostr(part.mMessage)}
 
 class ExtendedData(DataAdapter):
     __slots__ = ()
@@ -111,7 +165,6 @@ class WeatherData(DataAdapter):
     __slots__ = ()
     def info(self) -> dict:
         winfo = self.shmm.Rf2Weather.mWeatherInfo
-        # Correction index tableau pluie
         return {"et": rmnan(winfo.mET), "cloudiness": rmnan(winfo.mCloudiness), "ambient_temp": rmnan(winfo.mAmbientTempK) - 273.15, "rain_intensity": rmnan(winfo.mRaining[4])}
 
 class PitStrategyData:
@@ -142,5 +195,6 @@ class Vehicle(DataAdapter):
                 player_idx = i; found = True; break
         if not found: return {"is_driving": False, "driver_name": "Unknown"}
         scor_veh = self.shmm.rf2ScorVeh(player_idx)
-        is_driving = (scor_veh.mIsPlayer == 1 and scor_veh.mControl == 0 and self.shmm.rf2ScorInfo.mInRealtime == 1)
+        # FIX: safe_int
+        is_driving = (safe_int(scor_veh.mIsPlayer) == 1 and safe_int(scor_veh.mControl) == 0 and safe_int(self.shmm.rf2ScorInfo.mInRealtime) == 1)
         return {"is_driving": is_driving, "driver_name": tostr(scor_veh.mDriverName), "vehicle_index": player_idx}
