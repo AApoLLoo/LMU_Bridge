@@ -71,9 +71,8 @@ class RestAPIInfo:
         logger.info("RestAPI: GC: RestAPIInfo")
 
     def setConnection(self, config: dict):
-        """Update connection config"""
         self._cfg = config
-        self._active_interval = max(self._cfg["restapi_update_interval"], 100) / 1000
+        self._active_interval = max(self._cfg["restapi_update_interval"], 10) / 1000
 
     def start(self):
         """Start update thread"""
@@ -191,7 +190,7 @@ class RestAPIInfo:
             await self.update_repeat(http, uri_path, output_set, min_interval)
 
     async def update_once(
-        self, http: HttpSetup, uri_path: str, output_set: tuple[ResRawOutput, ...]) -> bool:
+            self, http: HttpSetup, uri_path: str, output_set: tuple[ResRawOutput, ...]) -> bool:
         """Update once and verify"""
         request_header = set_header_get(uri_path, http.host)
         data_available = False
@@ -199,9 +198,10 @@ class RestAPIInfo:
         while not self._task_cancel and retry >= 0:
             resource_output = await get_resource(request_header, http)
             # Verify & retry
-            if not isinstance(resource_output, TYPE_JSON):
-                logger.info("RestAPI: %s: %s (%s/%s retries left)",
-                    resource_output, uri_path, retry, total_retry)
+            if not isinstance(resource_output, (dict, list)):  # Correction de type
+                # Affiche l'erreur réelle dans les logs
+                logger.info("RestAPI: %s | %s (%s/%s retries left)",
+                            str(resource_output)[:50], uri_path, retry, total_retry)  # On coupe à 50 chars
                 retry -= 1
                 if retry < 0:
                     data_available = False
@@ -248,10 +248,9 @@ async def get_resource(request: bytes, http: HttpSetup) -> Any | str:
     try:
         async with http_get(request, http.host, http.port, http.timeout) as raw_bytes:
             return json_decoder.decode(raw_bytes.decode())
-    except (AttributeError, TypeError, IndexError, KeyError, ValueError,
-            OSError, TimeoutError, BaseException):
-        return "INVALID"
-
+    except Exception as e:
+        # MODIFICATION : On retourne l'erreur exacte pour le debug
+        return f"ERROR: {str(e)}"
 
 async def output_resource(
     dataset: RestAPIData, request: bytes, http: HttpSetup, output_set: tuple[ResRawOutput, ...], last_hash: int) -> int:

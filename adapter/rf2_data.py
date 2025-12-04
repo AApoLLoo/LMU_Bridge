@@ -39,26 +39,28 @@ class TelemetryData(DataAdapter):
     def wing_front(self, index: int | None = None) -> float: return rmnan(self.shmm.rf2TeleVeh(index).mFrontWingHeight)
     def downforce_front(self, index: int | None = None) -> float: return rmnan(self.shmm.rf2TeleVeh(index).mFrontDownforce)
     def downforce_rear(self, index: int | None = None) -> float: return rmnan(self.shmm.rf2TeleVeh(index).mRearDownforce)
-
     def virtual_energy(self, index: int | None = None) -> float:
-        # On essaie de lire via l'API REST
         if self.rest:
             try:
-                # Lecture des attributs bruts (en Joules probablement)
                 curr = getattr(self.rest.telemetry, 'currentVirtualEnergy', 0.0)
                 maxn = getattr(self.rest.telemetry, 'maxVirtualEnergy', 0.0)
-                # Conversion en pourcentage
+
+                # Cas idéal : On a le courant et le max
                 if maxn is not None and float(maxn) > 0:
                     return (float(curr) / float(maxn)) * 100.0
-                # Si pas de max mais une valeur courante (cas rare), on renvoie tel quel
+
+                # Cas dégradé : Pas de max, mais une valeur courante
                 if curr is not None:
-                    return float(curr)
+                    val = float(curr)
+                    # Si c'est un ratio (0.0-1.0), on convertit en %
+                    if val <= 1.0 and val > 0.0:
+                        return val * 100.0
+                    # Sinon on renvoie tel quel (peut-être déjà en %)
+                    return val
             except:
                 pass
 
-        # Si échec, 0.0
         return 0.0
-
     def max_virtual_energy(self, index: int | None = None) -> float:
         return 100.0
 
@@ -137,7 +139,9 @@ class ScoringData(DataAdapter):
             "sectors_best": (rmnan(veh.mBestSector1), rmnan(veh.mBestSector2)),
             "sectors_cur": (rmnan(veh.mCurSector1), rmnan(veh.mCurSector2)),
             "gap_leader": rmnan(veh.mTimeBehindLeader),
-            "gap_next": rmnan(veh.mTimeBehindNext)
+            "gap_next": rmnan(veh.mTimeBehindNext),
+            "x": rmnan(veh.mPos.x),
+            "z": rmnan(veh.mPos.z),
         }
 
 class RulesData(DataAdapter):

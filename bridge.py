@@ -1,18 +1,19 @@
 import tkinter as tk
-from tkinter import messagebox, ttk, scrolledtext, simpledialog
+from tkinter import messagebox, ttk, scrolledtext
 import threading
 import time
 import sys
 import os
-import queue
+import logging
 
+# --- FIX IMPORT ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
+# --- IMPORT DES CONNECTEURS ---
 try:
     from adapter.rf2_connector import RF2Info
-    # AJOUT : Import du connecteur REST
     from adapter.restapi_connector import RestAPIInfo
     from adapter.rf2_data import (
         TelemetryData, ScoringData, RulesData, ExtendedData,
@@ -36,12 +37,97 @@ def normalize_id(name):
     return safe
 
 
-# --- MOCK POUR REST API ---
-# RestAPIInfo a besoin d'un objet parent avec ces attributs
 class MockParentAPI:
     def __init__(self):
-        self.identifier = "LMU"  # Important pour cibler LMU
+        self.identifier = "LMU"
         self.isActive = True
+
+
+# --- CALCULATEUR DE CONSOMMATION ---
+class ConsumptionTracker:
+    def __init__(self, log_func):
+        self.log = log_func
+        self.reset()
+
+    def reset(self):
+        self.last_lap = -1
+        self.fuel_start = -1.0
+        self.ve_start = -1.0
+
+        self.fuel_last = 0.0
+        self.fuel_avg = 0.0
+        self.fuel_samples = 0
+
+        self.ve_last = 0.0
+        self.ve_avg = 0.0
+        self.ve_samples = 0
+
+    def update(self, current_lap, current_fuel, current_ve, in_pits):
+        # 1. Initialisation ou Restart Session
+        if self.last_lap == -1 or current_lap < self.last_lap:
+            self.last_lap = current_lap
+            self.fuel_start = current_fuel
+            self.ve_start = current_ve
+            if current_lap < self.last_lap and self.last_lap != -1:
+                self.log("🔄 Session redémarrée : Reset conso")
+            return
+
+        # 2. Passage de ligne (Nouveau tour)
+        if current_lap > self.last_lap:
+            fuel_delta = self.fuel_start - current_fuel
+            ve_delta = self.ve_start - current_ve
+
+            # On ignore les tours où on a ravitaillé (delta négatif) ou si on est dans les stands
+            if not in_pits and fuel_delta > 0.01:
+                # Mise à jour Fuel
+                self.fuel_last = fuel_delta
+                self.fuel_samples += 1
+                self.fuel_avg = self.fuel_avg + (fuel_delta - self.fuel_avg) / self.fuel_samples
+
+                self.log(f"🏁 Tour {self.last_lap} terminé. Conso: {fuel_delta:.2f}L")
+
+                # Mise à jour VE (Seulement si cohérent)
+                if ve_delta > 0.01:
+                    self.ve_last = ve_delta
+                    self.ve_samples += 1
+                    self.ve_avg = self.ve_avg + (ve_delta - self.ve_avg) / self.ve_samples
+
+            elif in_pits:
+                self.log(f"🛑 Tour {self.last_lap} ignoré (Stands)")
+
+            # Reset pour le prochain tour
+            self.last_lap = current_lap
+            self.fuel_start = current_fuel
+            self.ve_start = current_ve
+
+    def get_stats(self):
+        return {
+            "lastLapFuelConsumption": round(self.fuel_last, 2),
+            "averageConsumptionFuel": round(self.fuel_avg, 2),
+            "lastLapVEConsumption": round(self.ve_last, 2),
+            "averageConsumptionVE": round(self.ve_avg, 2)
+        }
+
+
+# --- GESTION DES LOGS GUI ---
+class TextHandler(logging.Handler):
+    def __init__(self, text_widget):
+        super().__init__()
+        self.text_widget = text_widget
+
+    def emit(self, record):
+        msg = self.format(record)
+
+        def append():
+            try:
+                self.text_widget.config(state=tk.NORMAL)
+                self.text_widget.insert(tk.END, "• " + msg + '\n')
+                self.text_widget.see(tk.END)
+                self.text_widget.config(state=tk.DISABLED)
+            except:
+                pass
+
+        self.text_widget.after(0, append)
 
 
 class BridgeLogic:
@@ -52,16 +138,17 @@ class BridgeLogic:
         self.debug_mode = False
         self.fb = None
         self.rf2_info = None
-        self.rest_info = None  # AJOUT
+        self.rest_info = None
         self.thread = None
         self.line_up_name = ""
         self.team_id = ""
         self.driver_pseudo = ""
+        # FIX: On passe bien self.log au constructeur ici
+        self.tracker = ConsumptionTracker(self.log)
 
     def set_debug(self, enabled):
         self.debug_mode = enabled
-        state = "ACTIVÉ" if enabled else "DÉSACTIVÉ"
-        self.log(f"🔧 Mode Debug {state}")
+        self.log(f"🔧 Mode Debug {'ACTIVÉ' if enabled else 'DÉSACTIVÉ'}")
 
     def connect_db(self):
         try:
@@ -84,6 +171,7 @@ class BridgeLogic:
         self.team_id = normalize_id(line_up_name)
         self.driver_pseudo = driver_pseudo
         self.running = True
+        self.tracker.reset()
 
         if self.fb:
             self.fb.register_driver_if_new("strategies", self.team_id, driver_pseudo)
@@ -94,18 +182,11 @@ class BridgeLogic:
 
     def stop(self):
         self.running = False
-        if self.rf2_info:
-            try:
-                self.rf2_info.stop()
-            except:
-                pass
-        # AJOUT : Arrêt propre du REST
-        if self.rest_info:
-            try:
-                self.rest_info.stop()
-            except:
-                pass
-
+        try:
+            if self.rf2_info: self.rf2_info.stop()
+            if self.rest_info: self.rest_info.stop()
+        except:
+            pass
         if self.fb: self.fb.stop()
         if self.thread: self.thread.join(timeout=1.0)
         self.set_status("STOPPED", COLORS["danger"])
@@ -117,79 +198,139 @@ class BridgeLogic:
 
         pit_strategy = PitStrategyData(port=6397)
 
-        # Init REST API avec configuration LMU par défaut
         mock_parent = MockParentAPI()
         self.rest_info = RestAPIInfo(mock_parent)
-        # Configuration standard LMU (Port 9000 pour le REST API)
         self.rest_info.setConnection({
             "url_host": "localhost",
-            "url_port_lmu": 6937,
+            "url_port_lmu": 6397,
             "connection_timeout": 1.0,
             "connection_retry": 3,
             "connection_retry_delay": 2,
-            "restapi_update_interval": 200,
+            "restapi_update_interval": 50,
             "enable_restapi_access": True,
             "enable_weather_info": True,
             "enable_session_info": True,
             "enable_garage_setup_info": True,
             "enable_vehicle_info": True,
-            "enable_energy_remaining": True,
+            "enable_energy_remaining": True
         })
 
         telemetry = scoring = rules = extended = pit_info = weather = vehicle_helper = None
 
         last_game_check = 0
         last_update_time = 0
-        UPDATE_RATE = 0.05  # 20Hz pour fluidité
+        UPDATE_RATE = 0.05
 
         while self.running:
             current_time = time.time()
 
-            # 1. Connexion Jeu
             if self.rf2_info is None:
                 if current_time - last_game_check > 5.0:
                     try:
                         self.rf2_info = RF2Info()
                         self.rf2_info.start()
-
-                        # Démarrage du thread REST API
                         self.rest_info.start()
-
-                        self.log("🎮 Jeu détecté ! Capteurs & REST API actifs.")
+                        self.log("🎮 Jeu détecté ! API active.")
                         self.set_status("CONNECTED", COLORS["success"])
 
-                        # On passe self.rest_info aux datas
-                        telemetry = TelemetryData(self.rf2_info, self.rest_info)  # <--- MODIFIE
+                        telemetry = TelemetryData(self.rf2_info, self.rest_info)
                         scoring = ScoringData(self.rf2_info)
                         rules = RulesData(self.rf2_info)
                         extended = ExtendedData(self.rf2_info)
                         pit_info = PitInfoData(self.rf2_info)
                         weather = WeatherData(self.rf2_info)
                         vehicle_helper = Vehicle(self.rf2_info)
+
+                        self.tracker.reset()
+
                     except Exception as e:
-                        print(f"Erreur init modules: {e}")
-                        pass
+                        self.log(f"⚠️ Erreur init: {e}")
+                        try:
+                            if self.rf2_info: self.rf2_info.stop()
+                        except:
+                            pass
+                        self.rf2_info = None
+                        vehicle_helper = None
                     last_game_check = current_time
                 time.sleep(0.1)
                 continue
 
-            # 2. Boucle Télémétrie
             try:
+                if vehicle_helper is None: raise Exception("Helper non initialisé")
+
                 status = vehicle_helper.get_local_driver_status()
 
                 if status['is_driving'] and (current_time - last_update_time > UPDATE_RATE):
                     idx = status['vehicle_index']
                     game_driver = status['driver_name']
 
+                    curr_fuel = telemetry.fuel_level(idx)
+                    curr_ve = telemetry.virtual_energy(idx)
+                    curr_lap = telemetry.lap_number(idx)
+                    forecast_data = []
+                    try:
+                        # 1. Identifier la session en cours
+                        # 0-4: Practice, 5-8: Qualif, 9: Warmup, 10-13: Course
+                        sess_type = scoring.session_type()
+
+                        raw_forecast = None
+                        forecast_source = "Unknown"
+
+                        if sess_type < 5:
+                            raw_forecast = self.rest_info.telemetry.forecastPractice
+                            forecast_source = "Practice"
+                        elif sess_type < 9:
+                            raw_forecast = self.rest_info.telemetry.forecastQualify
+                            forecast_source = "Qualify"
+                        else:
+                            raw_forecast = self.rest_info.telemetry.forecastRace
+                            forecast_source = "Race"
+
+                        # 2. Traitement des données
+                        if raw_forecast:
+                            for node in raw_forecast:
+                                # Pluie (0.0 - 1.0)
+                                r_chance = max(0.0, getattr(node, "rain_chance", 0.0))
+                                rain_val = r_chance / 100.0
+
+                                # Nuages (0=Clair ... 10=Orage) -> Conversion %
+                                sky = getattr(node, "sky_type", 0)
+                                cloud_val = min(max(sky, 0) / 4.0, 1.0)
+
+                                # Température
+                                temp_val = getattr(node, "temperature", 0.0)
+
+                                forecast_data.append({
+                                    "rain": rain_val,
+                                    "cloud": cloud_val,
+                                    "temp": temp_val
+                                })
+
+                    except Exception as e:
+                        if self.debug_mode: self.log(f"Err Forecast: {e}")
+                    try:
+                        scor_veh = scoring.get_vehicle_scoring(idx)
+                        in_pits = (scor_veh.get('in_pits', 0) == 1)
+                    except:
+                        in_pits = False
+
+                    self.tracker.update(curr_lap, curr_fuel, curr_ve, in_pits)
+                    stats = self.tracker.get_stats()
+
                     payload = {
                         "driverName": game_driver,
                         "activeDriverId": self.driver_pseudo,
+                        "lastLapFuelConsumption": stats["lastLapFuelConsumption"],
+                        "averageConsumptionFuel": stats["averageConsumptionFuel"],
+                        "lastLapVEConsumption": stats["lastLapVEConsumption"],
+                        "averageConsumptionVE": stats["averageConsumptionVE"],
+                        "weatherForecast": forecast_data,
                         "telemetry": {
                             "gear": telemetry.gear(idx),
                             "rpm": telemetry.rpm(idx),
                             "speed": vehicle_helper.speed(idx),
-                            "fuel": telemetry.fuel_level(idx),
-                            "fuelCapacity": telemetry.fuel_capacity(idx),  # Ajout utile
+                            "fuel": curr_fuel,
+                            "fuelCapacity": telemetry.fuel_capacity(idx),
                             "inputs": {
                                 "thr": telemetry.input_throttle(idx),
                                 "brk": telemetry.input_brake(idx),
@@ -208,9 +349,8 @@ class BridgeLogic:
                                 "brake_temp": telemetry.brake_temp(idx)
                             },
                             "electric": telemetry.electric_data(idx),
-                            # Récupération de la VRAIE énergie virtuelle via REST
-                            "virtual_energy": telemetry.virtual_energy(idx),
-                            "max_virtual_energy": telemetry.max_virtual_energy(idx)
+                            "virtual_energy": curr_ve,
+                            "max_virtual_energy": 100.0
                         },
                         "scoring": {
                             "track": scoring.track_name(),
@@ -240,8 +380,7 @@ class BridgeLogic:
                     self.set_status(f"SENDING ({game_driver})", COLORS["accent"])
 
                     if self.debug_mode:
-                        t = payload["telemetry"]
-                        self.log(f"📤 VE: {t['virtual_energy']:.1f}% | Fuel: {t['fuel']:.1f}L")
+                        self.log(f"📤 Data envoyé pour '{game_driver}': {payload}")
 
                 elif not status['is_driving']:
                     self.set_status("IDLE (NOT DRIVING)", "#94a3b8")
@@ -249,10 +388,9 @@ class BridgeLogic:
 
             except Exception as e:
                 self.log(f"⚠️ Erreur boucle: {e}")
-                # En cas de crash, on nettoie
                 try:
-                    self.rf2_info.stop()
-                    self.rest_info.stop()
+                    if self.rf2_info: self.rf2_info.stop()
+                    if self.rest_info: self.rest_info.stop()
                 except:
                     pass
                 self.rf2_info = None
@@ -261,7 +399,6 @@ class BridgeLogic:
             time.sleep(0.01)
 
 
-# ... (Classe BridgeApp identique à avant)
 class BridgeApp:
     def __init__(self, root):
         self.root = root
@@ -318,6 +455,12 @@ class BridgeApp:
         self.txt_log.pack(fill="both", expand=True, padx=30, pady=(10, 30))
         self.txt_log.config(state=tk.DISABLED)
 
+        handler = TextHandler(self.txt_log)
+        formatter = logging.Formatter('%(message)s')
+        handler.setFormatter(formatter)
+        logging.getLogger().addHandler(handler)
+        logging.getLogger().setLevel(logging.INFO)
+
         self.logic = BridgeLogic(self.log, self.set_status)
 
     def log(self, msg):
@@ -343,7 +486,6 @@ class BridgeApp:
         threading.Thread(target=self._check_and_start, args=(lineup, pseudo)).start()
 
     def _check_and_start(self, lineup, pseudo):
-        # On vérifie avec le nom brut, la méthode check_team normalisera
         info = self.logic.check_team(lineup)
         if info and info["exists"]:
             self.log(f"✅ Line Up trouvée ! ({info.get('category')})")
