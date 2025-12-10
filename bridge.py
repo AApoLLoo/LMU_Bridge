@@ -63,6 +63,7 @@ class ConsumptionTracker:
         self.ve_samples = 0
 
     def update(self, current_lap, current_fuel, current_ve, in_pits):
+
         if self.last_lap == -1 or current_lap < self.last_lap:
             self.last_lap = current_lap
             self.fuel_start = current_fuel
@@ -137,16 +138,17 @@ class TelemetryRecorder:
 
         self.current_lap = lap_number
 
-        # On n'enregistre que si la voiture roule (> 5 km/h) pour économiser la RAM
+        # On n'enregistre que si la voiture roule (> 5 km/h)
         if vehicle_helper.speed(vehicle_idx) > 5:
             self.buffer.append({
-                "d": round(distance_lap, 1),  # Distance (m)
-                "s": round(vehicle_helper.speed(vehicle_idx), 1),  # Vitesse (km/h)
-                "t": round(telemetry_obj.input_throttle(vehicle_idx), 2),  # Accélérateur (%)
-                "b": round(telemetry_obj.input_brake(vehicle_idx), 2),  # Frein (%)
-                "r": round(telemetry_obj.rpm(vehicle_idx), 0),  # RPM
-                "g": telemetry_obj.gear(vehicle_idx),  # Rapport
-                "w": round(telemetry_obj.input_steering(vehicle_idx), 3)  # Volant
+                "d": round(distance_lap, 1),
+                "s": round(vehicle_helper.speed(vehicle_idx), 1),
+                "t": round(telemetry_obj.input_throttle(vehicle_idx) * 100, 1),
+                "b": round(telemetry_obj.input_brake(vehicle_idx) * 100, 1),
+                # ---------------------------------------------------------------
+                "r": round(telemetry_obj.rpm(vehicle_idx), 0),
+                "g": telemetry_obj.gear(vehicle_idx),
+                "w": round(telemetry_obj.input_steering(vehicle_idx), 3)
             })
 
     def flush_lap(self, lap_num):
