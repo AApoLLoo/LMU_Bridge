@@ -5,6 +5,7 @@ import time
 import sys
 import os
 import logging
+import uuid  # Nécessaire pour l'identifiant de session unique
 
 # --- FIX IMPORT ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -116,6 +117,54 @@ class TextHandler(logging.Handler):
         self.text_widget.after(0, append)
 
 
+# --- AJOUT DU RECORDER (POUR L'HISTORIQUE BDD) ---
+class TelemetryRecorder:
+    def __init__(self, upload_callback):
+        self.upload = upload_callback
+        self.buffer = []
+        self.current_lap = -1
+        # Infos contextuelles
+        self.team_id = ""
+        self.session_uuid = ""
+        self.track_name = ""
+        self.driver_name = ""
+
+    def update(self, lap_number, vehicle_idx, telemetry_obj, vehicle_helper, distance_lap):
+        # Si nouveau tour détecté
+        if self.current_lap != -1 and lap_number > self.current_lap:
+            self.flush_lap(self.current_lap)
+            self.buffer = []  # Reset du buffer
+
+        self.current_lap = lap_number
+
+        # On n'enregistre que si la voiture roule (> 5 km/h) pour économiser la RAM
+        if vehicle_helper.speed(vehicle_idx) > 5:
+            self.buffer.append({
+                "d": round(distance_lap, 1),  # Distance (m)
+                "s": round(vehicle_helper.speed(vehicle_idx), 1),  # Vitesse (km/h)
+                "t": round(telemetry_obj.input_throttle(vehicle_idx), 2),  # Accélérateur (%)
+                "b": round(telemetry_obj.input_brake(vehicle_idx), 2),  # Frein (%)
+                "r": round(telemetry_obj.rpm(vehicle_idx), 0),  # RPM
+                "g": telemetry_obj.gear(vehicle_idx),  # Rapport
+                "w": round(telemetry_obj.input_steering(vehicle_idx), 3)  # Volant
+            })
+
+    def flush_lap(self, lap_num):
+        if not self.buffer: return
+
+        payload = {
+            "teamId": self.team_id,
+            "sessionUUID": self.session_uuid,
+            "trackName": self.track_name,
+            "driverName": self.driver_name,
+            "lap_number": lap_num,
+            "lap_time": 0,  # Le temps exact sera maj par le serveur si besoin
+            "samples": self.buffer
+        }
+        # Envoi via la méthode dédiée du connecteur
+        self.upload(payload)
+
+
 class BridgeLogic:
     def __init__(self, log_callback, status_callback):
         self.log = log_callback
@@ -131,6 +180,7 @@ class BridgeLogic:
         self.driver_pseudo = ""
         self.tracker = ConsumptionTracker(self.log)
         self.session_id = 0
+        self.recorder = None  # Init du recorder
 
     def set_debug(self, enabled):
         self.debug_mode = enabled
@@ -197,6 +247,20 @@ class BridgeLogic:
         last_update_time = 0
         UPDATE_RATE = 0.05
 
+        # --- INIT RECORDER & UUID SESSION ---
+        # On génère un ID unique pour cette session de jeu (ex: pour grouper les tours en BDD)
+        session_uuid = str(uuid.uuid4())
+
+        # On initialise le recorder avec la méthode d'envoi d'historique
+        if self.connector:
+            self.recorder = TelemetryRecorder(self.connector.send_telemetry_history)
+        else:
+            # Fallback si le connecteur n'est pas encore prêt (ne devrait pas arriver ici)
+            self.recorder = TelemetryRecorder(lambda x: print("Recorder not connected"))
+
+        self.recorder.session_uuid = session_uuid
+        self.recorder.team_id = self.team_id
+
         while self.running:
             if self.session_id != my_session_id: break
             current_time = time.time()
@@ -209,6 +273,8 @@ class BridgeLogic:
                         self.rest_info.start()
                         self.log("🎮 Jeu détecté !")
                         self.set_status("CONNECTED (GAME)", COLORS["success"])
+
+                        # Initialisation des adapters
                         telemetry = TelemetryData(self.rf2_info, self.rest_info)
                         scoring = ScoringData(self.rf2_info)
                         rules = RulesData(self.rf2_info)
@@ -216,6 +282,7 @@ class BridgeLogic:
                         pit_info = PitInfoData(self.rf2_info)
                         weather = WeatherData(self.rf2_info)
                         vehicle_helper = Vehicle(self.rf2_info)
+
                         self.tracker.reset()
                     except:
                         self.rf2_info = None
@@ -225,12 +292,37 @@ class BridgeLogic:
 
             try:
                 status = vehicle_helper.get_local_driver_status()
+
+                # On ne traite que si on roule et que le délai est passé
                 if status['is_driving'] and (current_time - last_update_time > UPDATE_RATE):
                     idx = status['vehicle_index']
                     game_driver = status['driver_name']
+
+                    # Mise à jour des infos contextuelles pour le recorder
+                    self.recorder.driver_name = game_driver
+                    self.recorder.track_name = scoring.track_name() if scoring else "Unknown"
+
+                    # --- RECUPERATION DONNEES ---
                     curr_fuel = telemetry.fuel_level(idx)
                     curr_ve = telemetry.virtual_energy(idx)
                     curr_lap = telemetry.lap_number(idx)
+
+                    # --- RECORDER UPDATE (HISTORIQUE) ---
+                    # On le place ICI, à l'intérieur du IF IS_DRIVING pour avoir accès à 'curr_lap' et 'idx'
+                    try:
+                        dist = 0
+                        # Vérification de l'existence de la méthode lap_distance (dépend de scoring ou telemetry)
+                        if hasattr(telemetry, 'lap_distance'):
+                            dist = telemetry.lap_distance(idx)
+                        elif hasattr(scoring, 'get_vehicle_scoring'):
+                            # Fallback via scoring vehicle data
+                            v_data = scoring.get_vehicle_scoring(idx)
+                            dist = v_data.get('lap_dist', 0)
+
+                        self.recorder.update(curr_lap, idx, telemetry, vehicle_helper, dist)
+                    except Exception as rec_err:
+                        # On ne veut pas bloquer le live si le recorder plante
+                        pass
 
                     # --- CORRECTION POSITION DE CLASSE ---
                     all_vehicles = [scoring.get_vehicle_scoring(i) for i in range(scoring.vehicle_count())]
@@ -244,10 +336,9 @@ class BridgeLogic:
                                 'position']:
                                 class_rank += 1
 
-                    # On injecte la position dans l'objet véhicule
                     scor_veh['classPosition'] = class_rank
 
-                    # --- CORRECTION TEMPS RESTANT ---
+                    # --- TEMPS RESTANT ---
                     time_info = scoring.time_info()
                     time_rem = 0
                     if time_info['end'] > 0:
@@ -257,6 +348,7 @@ class BridgeLogic:
                     self.tracker.update(curr_lap, curr_fuel, curr_ve, in_pits)
                     stats = self.tracker.get_stats()
 
+                    # --- CONSTRUCTION PAYLOAD LIVE ---
                     payload = {
                         "teamId": self.team_id,
                         "driverName": game_driver,
@@ -273,7 +365,7 @@ class BridgeLogic:
                             "fuel": curr_fuel,
                             "fuelCapacity": telemetry.fuel_capacity(idx),
                             "inputs": {"thr": telemetry.input_throttle(idx), "brk": telemetry.input_brake(idx),
-                            "clt": telemetry.input_clutch(idx), "str": telemetry.input_steering(idx)},
+                                       "clt": telemetry.input_clutch(idx), "str": telemetry.input_steering(idx)},
                             "temps": {
                                 "oil": telemetry.temp_oil(idx),
                                 "water": telemetry.temp_water(idx)
@@ -287,10 +379,13 @@ class BridgeLogic:
                             "track": scoring.track_name(),
                             "time": time_info,
                             "flags": scoring.flag_state(),
-                            "weather": scoring.weather_env(),
+                            "weather": scoring.weather_env(),  # Info basique du scoring
                             "vehicles": all_vehicles,
                             "vehicle_data": scor_veh
                         },
+                        # --- AJOUT WEATHER DETAILED (DEMANDÉ) ---
+                        "weather_live": weather.info(),
+
                         "rules": {
                             "sc": rules.sc_info(),
                             "yellow": rules.yellow_flag(),
@@ -308,7 +403,6 @@ class BridgeLogic:
                     last_update_time = current_time
                     self.set_status(f"LIVE P{class_rank} ({game_driver})", COLORS["accent"])
 
-                    # --- DEBUG MODE (RÉACTIVÉ) ---
                     if self.debug_mode:
                         self.log(f"📤 Sent VPS | Payload: {payload}")
 
@@ -326,7 +420,7 @@ class BridgeLogic:
 class BridgeApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("LMU Bridge (VPS Fix)")
+        self.root.title("LMU Bridge (VPS Fix + Recorder)")
         self.root.geometry("500x600")
         self.root.configure(bg=COLORS["bg"])
 

@@ -28,13 +28,26 @@ class SocketConnector:
             return
 
         try:
-            # Envoi des données (le nom 'telemetry_data' doit correspondre au server.py)
+            # Envoi des données temps réel
             self.sio.emit('telemetry_data', data)
         except Exception as e:
             print(f"Erreur d'envoi : {e}")
             self.is_connected = False
-            # On tente de se déconnecter proprement pour reconnecter au prochain tour
             try:
                 self.sio.disconnect()
             except:
                 pass
+
+    # --- AJOUTEZ CETTE MÉTHODE ---
+    def send_telemetry_history(self, data):
+        """Envoie l'historique complet d'un tour (pour les graphiques/Motec)"""
+        if not self.is_connected:
+            self.connect()
+            if not self.is_connected: return
+
+        try:
+            # On utilise un événement différent pour ne pas mélanger avec le live
+            self.sio.emit('telemetry_history', data)
+            print(f"📦 Historique Tour {data.get('lap_number')} envoyé au serveur.")
+        except Exception as e:
+            print(f"⚠️ Erreur envoi historique : {e}")
