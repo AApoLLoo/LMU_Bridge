@@ -76,6 +76,19 @@ class TelemetryData(DataAdapter):
         }
     def tire_pressure(self, index: int | None = None) -> list[float]: return [rmnan(w.mPressure) for w in self.shmm.rf2TeleVeh(index).mWheels]
     def tire_wear(self, index: int | None = None) -> list[float]: return [rmnan(w.mWear) for w in self.shmm.rf2TeleVeh(index).mWheels]
+
+    # --- MÉTHODE AJOUTÉE ICI ---
+    def tire_compound_name(self, index: int | None = None) -> dict:
+        try:
+            # Récupération du nom (souvent un seul pour toute la voiture dans rF2)
+            name = tostr(self.shmm.rf2TeleVeh(index).mTireCompoundName)
+            # On le formate pour le frontend qui attend {fl, fr, rl, rr}
+            return {"fl": name, "fr": name, "rl": name, "rr": name}
+        except:
+            # Fallback si l'info n'est pas dispo
+            return {"fl": "---", "fr": "---", "rl": "---", "rr": "---"}
+    # ---------------------------
+
     def brake_temp(self, index: int | None = None) -> list[float]: return [rmnan(w.mBrakeTemp) - 273.15 for w in self.shmm.rf2TeleVeh(index).mWheels]
     def brake_wear(self, index: int | None = None) -> tuple[float, float, float, float]:
         if self.rest:
