@@ -87,8 +87,9 @@ class RestAPIInfo:
         """Stop update thread"""
         if self._updating:
             self._event.set()
-            if self._update_thread is not None:
-                self._update_thread.join()
+            self._updating = False
+            if self._update_thread and self._update_thread.is_alive():
+                self._update_thread.join(timeout=1.0)
             self._updating = False
             logger.info("RestAPI: UPDATING: thread stopped")
 

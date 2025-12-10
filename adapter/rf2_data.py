@@ -63,11 +63,9 @@ class TelemetryData(DataAdapter):
         return 0.0
     def max_virtual_energy(self, index: int | None = None) -> float:
         return 100.0
-
     def local_velocity(self, index: int | None = None) -> tuple[float, float, float]:
         vel = self.shmm.rf2TeleVeh(index).mLocalVel
         return rmnan(vel.x), rmnan(vel.y), rmnan(vel.z)
-
     def tire_temps(self, index: int | None = None) -> dict:
         wheels = self.shmm.rf2TeleVeh(index).mWheels
         return {
@@ -76,11 +74,13 @@ class TelemetryData(DataAdapter):
             "rl": [rmnan(t) - 273.15 for t in wheels[2].mTemperature],
             "rr": [rmnan(t) - 273.15 for t in wheels[3].mTemperature]
         }
-
     def tire_pressure(self, index: int | None = None) -> list[float]: return [rmnan(w.mPressure) for w in self.shmm.rf2TeleVeh(index).mWheels]
     def tire_wear(self, index: int | None = None) -> list[float]: return [rmnan(w.mWear) for w in self.shmm.rf2TeleVeh(index).mWheels]
     def brake_temp(self, index: int | None = None) -> list[float]: return [rmnan(w.mBrakeTemp) - 273.15 for w in self.shmm.rf2TeleVeh(index).mWheels]
-
+    def brake_wear(self, index: int | None = None) -> tuple[float, float, float, float]:
+        if self.rest:
+            return getattr(self.rest.telemetry, 'brakeWear', (0.0, 0.0, 0.0, 0.0))
+        return (0.0, 0.0, 0.0, 0.0)
     def surface_type(self, index: int | None = None) -> list[int]: return [safe_int(w.mSurfaceType) for w in self.shmm.rf2TeleVeh(index).mWheels]
     def wheel_detached(self, index: int | None = None) -> list[bool]: return [bool(w.mDetached) for w in self.shmm.rf2TeleVeh(index).mWheels]
     def tire_flat(self, index: int | None = None) -> list[bool]: return [bool(w.mFlat) for w in self.shmm.rf2TeleVeh(index).mWheels]

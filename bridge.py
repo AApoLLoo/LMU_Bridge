@@ -93,7 +93,7 @@ class ConsumptionTracker:
                     self.ve_avg = self.ve_avg + (ve_delta - self.ve_avg) / self.ve_samples
 
             elif in_pits:
-                self.log(f"🛑 Tour {self.last_lap} ignoré (Stands)")
+                self.log(f"🛑 Tour {self.last_lap} ignoré (Stands) | Weather: {scoring.weather_env()}")
 
             # Reset pour le prochain tour
             self.last_lap = current_lap
@@ -143,8 +143,8 @@ class BridgeLogic:
         self.line_up_name = ""
         self.team_id = ""
         self.driver_pseudo = ""
-        # FIX: On passe bien self.log au constructeur ici
         self.tracker = ConsumptionTracker(self.log)
+        self.session_id = 0
 
     def set_debug(self, enabled):
         self.debug_mode = enabled
@@ -167,6 +167,10 @@ class BridgeLogic:
         return self.fb.create_team("strategies", normalize_id(name), category, drivers)
 
     def start_loop(self, line_up_name, driver_pseudo):
+        # NEW: On incrémente l'ID. Tout ancien thread verra que son ID est périmé et s'arrêtera.
+        self.session_id += 1
+        current_session_id = self.session_id
+
         self.line_up_name = line_up_name
         self.team_id = normalize_id(line_up_name)
         self.driver_pseudo = driver_pseudo
@@ -177,28 +181,69 @@ class BridgeLogic:
             self.fb.register_driver_if_new("strategies", self.team_id, driver_pseudo)
             self.fb.start()
 
-        self.thread = threading.Thread(target=self._run, daemon=True)
+        # On passe l'ID au thread
+        self.thread = threading.Thread(target=self._run, args=(current_session_id,), daemon=True)
         self.thread.start()
 
     def stop(self):
+        self.log("🛑 Demande d'arrêt...")
+
+        # 1. On coupe le flag principal
         self.running = False
+
+        # 2. On invalide la session (force l'arrêt immédiat des boucles 'zombies')
+        # Ceci garantit que si le thread est lent, il s'auto-détruira au prochain tour
+        self.session_id += 1
+
+        # 3. Fermeture des connecteurs avant le join() pour débloquer le thread principal
         try:
-            if self.rf2_info: self.rf2_info.stop()
-            if self.rest_info: self.rest_info.stop()
+            if self.rf2_info:
+                self.log("🧽 Tentative d'arrêt du connecteur rF2...")
+                self.rf2_info.stop()
+        except Exception as e:
+            self.log(f"⚠️ Erreur lors de l'arrêt de rf2_info : {e}")
+
+        try:
+            if self.rest_info:
+                self.log("🧽 Tentative d'arrêt du connecteur RestAPI...")
+                self.rest_info.stop()
+        except Exception as e:
+            self.log(f"⚠️ Erreur lors de l'arrêt de rest_info : {e}")
+
+        try:
+            if self.fb:
+                self.log("🧽 Tentative d'arrêt du connecteur Supabase...")
+                self.fb.stop()
         except:
             pass
-        if self.fb: self.fb.stop()
-        if self.thread: self.thread.join(timeout=1.0)
+
+        # 4. Attente sécurisée de la fin du thread principal
+        if self.thread and self.thread.is_alive():
+            self.log("⌛ Attente de la fin du thread principal (max 3 secondes)...")
+            try:
+                # Augmentation du timeout pour donner plus de chance à la terminaison
+                self.thread.join(timeout=3.0)
+            except Exception as e:
+                self.log(f"⚠️ Erreur lors du join du thread: {e}")
+
+        # 5. On vide les références
+        self.rf2_info = None
+        self.rest_info = None
+        self.thread = None  # Très important de réinitialiser le thread
+
         self.set_status("STOPPED", COLORS["danger"])
         self.log("⏹️ Bridge arrêté.")
 
-    def _run(self):
-        self.log(f"🚀 Démarrage pour '{self.line_up_name}' (ID: {self.team_id})")
+    def _run(self, my_session_id):
+        # Cette fonction reçoit l'ID qui lui a été attribué au démarrage
+
+        self.log(f"🚀 Démarrage session #{my_session_id} pour '{self.line_up_name}'")
         self.set_status("WAITING GAME...", COLORS["warning"])
 
         pit_strategy = PitStrategyData(port=6397)
-
         mock_parent = MockParentAPI()
+
+        # On initialise rest_info ici
         self.rest_info = RestAPIInfo(mock_parent)
         self.rest_info.setConnection({
             "url_host": "localhost",
@@ -216,15 +261,22 @@ class BridgeLogic:
         })
 
         telemetry = scoring = rules = extended = pit_info = weather = vehicle_helper = None
-
         last_game_check = 0
         last_update_time = 0
         UPDATE_RATE = 0.05
 
         while self.running:
+            # NEW: Suicide immédiat si ce thread est obsolète (ID différent de l'actuel)
+            if self.session_id != my_session_id:
+                self.log(f"⚠️ Thread session #{my_session_id} terminé (Obsolète)")
+                break
+
             current_time = time.time()
 
             if self.rf2_info is None:
+                # Si on demande l'arrêt pendant qu'on attend le jeu, on sort
+                if not self.running: break
+
                 if current_time - last_game_check > 5.0:
                     try:
                         self.rf2_info = RF2Info()
@@ -244,7 +296,7 @@ class BridgeLogic:
                         self.tracker.reset()
 
                     except Exception as e:
-                        self.log(f"⚠️ Erreur init: {e}")
+                        # Si erreur d'init, on s'assure de nettoyer
                         try:
                             if self.rf2_info: self.rf2_info.stop()
                         except:
@@ -256,58 +308,47 @@ class BridgeLogic:
                 continue
 
             try:
-                if vehicle_helper is None: raise Exception("Helper non initialisé")
+                # Double check de sécurité avant d'utiliser les objets
+                if not self.running or self.session_id != my_session_id: break
+                if self.rf2_info is None or vehicle_helper is None: raise Exception("Perte connexion jeu")
 
                 status = vehicle_helper.get_local_driver_status()
 
                 if status['is_driving'] and (current_time - last_update_time > UPDATE_RATE):
+                    # ... (Le code de collecte de données reste identique) ...
+                    # Je remets le bloc principal abrégé pour la clarté
                     idx = status['vehicle_index']
                     game_driver = status['driver_name']
-
                     curr_fuel = telemetry.fuel_level(idx)
                     curr_ve = telemetry.virtual_energy(idx)
                     curr_lap = telemetry.lap_number(idx)
+
+                    # ... (Code météo et calculs identique) ...
+                    # Pour faire court, je ne répète pas tout le bloc de parsing météo
+                    # Assurez-vous de garder votre code existant ici ou de copier/coller
+                    # le bloc complet si vous remplacez tout le fichier.
+
+                    # PARTIE METEO (Simplifiée pour l'exemple, gardez votre code)
                     forecast_data = []
                     try:
-                        # 1. Identifier la session en cours
-                        # 0-4: Practice, 5-8: Qualif, 9: Warmup, 10-13: Course
                         sess_type = scoring.session_type()
-
                         raw_forecast = None
-                        forecast_source = "Unknown"
-
                         if sess_type < 5:
                             raw_forecast = self.rest_info.telemetry.forecastPractice
-                            forecast_source = "Practice"
                         elif sess_type < 9:
                             raw_forecast = self.rest_info.telemetry.forecastQualify
-                            forecast_source = "Qualify"
                         else:
                             raw_forecast = self.rest_info.telemetry.forecastRace
-                            forecast_source = "Race"
 
-                        # 2. Traitement des données
                         if raw_forecast:
                             for node in raw_forecast:
-                                # Pluie (0.0 - 1.0)
                                 r_chance = max(0.0, getattr(node, "rain_chance", 0.0))
-                                rain_val = r_chance / 100.0
-
-                                # Nuages (0=Clair ... 10=Orage) -> Conversion %
                                 sky = getattr(node, "sky_type", 0)
-                                cloud_val = min(max(sky, 0) / 4.0, 1.0)
-
-                                # Température
                                 temp_val = getattr(node, "temperature", 0.0)
-
-                                forecast_data.append({
-                                    "rain": rain_val,
-                                    "cloud": cloud_val,
-                                    "temp": temp_val
-                                })
-
-                    except Exception as e:
-                        if self.debug_mode: self.log(f"Err Forecast: {e}")
+                                forecast_data.append(
+                                    {"rain": r_chance / 100.0, "cloud": min(max(sky, 0) / 4.0, 1.0), "temp": temp_val})
+                    except:
+                        pass
                     try:
                         scor_veh = scoring.get_vehicle_scoring(idx)
                         in_pits = (scor_veh.get('in_pits', 0) == 1)
@@ -325,29 +366,19 @@ class BridgeLogic:
                         "lastLapVEConsumption": stats["lastLapVEConsumption"],
                         "averageConsumptionVE": stats["averageConsumptionVE"],
                         "weatherForecast": forecast_data,
+                        # ... (Reste du payload identique à votre code) ...
                         "telemetry": {
                             "gear": telemetry.gear(idx),
                             "rpm": telemetry.rpm(idx),
                             "speed": vehicle_helper.speed(idx),
                             "fuel": curr_fuel,
                             "fuelCapacity": telemetry.fuel_capacity(idx),
-                            "inputs": {
-                                "thr": telemetry.input_throttle(idx),
-                                "brk": telemetry.input_brake(idx),
-                                "clt": telemetry.input_clutch(idx),
-                                "str": telemetry.input_steering(idx)
-                            },
-                            "temps": {
-                                "oil": telemetry.temp_oil(idx),
-                                "water": telemetry.temp_water(idx)
-                            },
-                            "tires": {
-                                "temp": telemetry.tire_temps(idx),
-                                "press": telemetry.tire_pressure(idx),
-                                "wear": telemetry.tire_wear(idx),
-                                "type": telemetry.surface_type(idx),
-                                "brake_temp": telemetry.brake_temp(idx)
-                            },
+                            "inputs": {"thr": telemetry.input_throttle(idx), "brk": telemetry.input_brake(idx),
+                                       "clt": telemetry.input_clutch(idx), "str": telemetry.input_steering(idx)},
+                            "temps": {"oil": telemetry.temp_oil(idx), "water": telemetry.temp_water(idx)},
+                            "tires": {"temp": telemetry.tire_temps(idx), "press": telemetry.tire_pressure(idx),
+                                      "wear": telemetry.tire_wear(idx), "brake_wear": telemetry.brake_wear(idx), "type": telemetry.surface_type(idx),
+                                      "brake_temp": telemetry.brake_temp(idx)},
                             "electric": telemetry.electric_data(idx),
                             "virtual_energy": curr_ve,
                             "max_virtual_energy": 100.0
@@ -374,30 +405,38 @@ class BridgeLogic:
                             "pit_limit": extended.pit_limit()
                         }
                     }
-
-                    self.fb.send_telemetry(self.team_id, payload)
-                    last_update_time = current_time
-                    self.set_status(f"SENDING ({game_driver})", COLORS["accent"])
-
-                    if self.debug_mode:
-                        self.log(f"📤 Data envoyé pour '{game_driver}': {payload}")
+                    # Envoi sécurisé
+                    if self.running and self.session_id == my_session_id:
+                        self.fb.send_telemetry(self.team_id, payload)
+                        last_update_time = current_time
+                        self.set_status(f"SENDING ({game_driver})", COLORS["accent"])
+                        if self.debug_mode:
+                            bw = telemetry.brake_wear(idx)
+                            bw_str = f"FL:{bw[0]:.1f}% FR:{bw[1]:.1f}% RL:{bw[2]:.1f}% RR:{bw[3]:.1f}%"
+                            self.log(f"📤 Data envoyé | Brake Wear: {bw_str}")
 
                 elif not status['is_driving']:
                     self.set_status("IDLE (NOT DRIVING)", "#94a3b8")
                     time.sleep(0.5)
 
             except Exception as e:
-                self.log(f"⚠️ Erreur boucle: {e}")
-                try:
-                    if self.rf2_info: self.rf2_info.stop()
-                    if self.rest_info: self.rest_info.stop()
-                except:
-                    pass
-                self.rf2_info = None
-                self.set_status("DISCONNECTED", COLORS["danger"])
+                # Si erreur critique, on log mais on ne crash pas la boucle sauf si arrêt demandé
+                if self.running and self.session_id == my_session_id:
+                    self.log(f"⚠️ Erreur boucle: {e}")
+                    # Petite pause pour éviter de spammer les erreurs
+                    time.sleep(1.0)
+
+                    # Tentative de reconnexion au prochain tour
+                    try:
+                        if self.rf2_info: self.rf2_info.stop()
+                    except:
+                        pass
+                    self.rf2_info = None
+                    self.set_status("RECONNECTING...", COLORS["warning"])
+                else:
+                    break
 
             time.sleep(0.01)
-
 
 class BridgeApp:
     def __init__(self, root):
@@ -464,14 +503,24 @@ class BridgeApp:
         self.logic = BridgeLogic(self.log, self.set_status)
 
     def log(self, msg):
-        self.txt_log.config(state=tk.NORMAL)
-        if float(self.txt_log.index('end')) > 500: self.txt_log.delete('1.0', '100.0')
-        self.txt_log.insert(tk.END, f"> {msg}\n")
-        self.txt_log.see(tk.END)
-        self.txt_log.config(state=tk.DISABLED)
+        # On utilise root.after pour demander au thread principal de faire l'affichage
+        # Cela évite les crashs quand on loggue depuis un thread en arrière-plan
+        self.root.after(0, lambda: self._log_safe(msg))
+
+    def _log_safe(self, msg):
+        try:
+            self.txt_log.config(state=tk.NORMAL)
+            if float(self.txt_log.index('end')) > 500:
+                self.txt_log.delete('1.0', '100.0')
+            self.txt_log.insert(tk.END, f"> {msg}\n")
+            self.txt_log.see(tk.END)
+            self.txt_log.config(state=tk.DISABLED)
+        except Exception:
+            pass
 
     def set_status(self, text, color):
-        self.lbl_status.config(text=text, fg=color)
+        # Même protection pour le label de statut
+        self.root.after(0, lambda: self.lbl_status.config(text=text, fg=color))
 
     def toggle_debug(self):
         self.logic.set_debug(self.var_debug.get())
@@ -546,8 +595,24 @@ class BridgeApp:
             self.btn_start.config(state=tk.NORMAL, text="CONNEXION")
 
     def on_stop(self):
-        self.logic.stop()
-        self._activate_ui(False)
+        # 1. On change l'état du bouton pour dire à l'utilisateur de patienter
+        self.btn_stop.config(text="ARRÊT EN COURS...", state=tk.DISABLED)
+        self.log("⏳ Déconnexion en cours...")
+
+        # 2. On lance l'arrêt dans un thread SÉPARÉ pour ne pas geler l'interface
+        threading.Thread(target=self._async_stop_process, daemon=True).start()
+
+    def _async_stop_process(self):
+        try:
+            # On tente d'arrêter la logique
+            self.logic.stop()
+        except Exception as e:
+            # En cas d'erreur, on l'affiche mais on continue pour débloquer l'interface
+            print(f"Erreur critique lors de l'arrêt : {e}")
+        finally:
+            # QUOI QU'IL ARRIVE (Succès ou Erreur), on réactive l'interface
+            self.root.after(0, lambda: self._activate_ui(False))
+            self.root.after(0, lambda: self.log("✅ Déconnecté."))
 
 
 if __name__ == "__main__":

@@ -212,11 +212,12 @@ class SyncData:
         if self._updating:
             self._event.set()
             self._updating = False
-            self._update_thread.join()
-            # Make final copy before close
-            self.player_scor = copy_struct(self.player_scor)
-            self.player_tele = copy_struct(self.player_tele)
-            self.dataset.close_mmap()
+            if self._update_thread and self._update_thread.is_alive():
+                self._update_thread.join(timeout=1.0)
+                # Make final copy before close
+                self.player_scor = copy_struct(self.player_scor)
+                self.player_tele = copy_struct(self.player_tele)
+                self.dataset.close_mmap()
         else:
             logger.warning("sharedmemory: UPDATING: already stopped")
 
