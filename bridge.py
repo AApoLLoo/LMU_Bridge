@@ -272,8 +272,8 @@ class BridgeLogic:
                             "speed": vehicle_helper.speed(idx),
                             "fuel": curr_fuel,
                             "fuelCapacity": telemetry.fuel_capacity(idx),
-                                                        "inputs": {"thr": telemetry.input_throttle(idx), "brk": telemetry.input_brake(idx),
-                                       "clt": telemetry.input_clutch(idx), "str": telemetry.input_steering(idx)},
+                            "inputs": {"thr": telemetry.input_throttle(idx), "brk": telemetry.input_brake(idx),
+                            "clt": telemetry.input_clutch(idx), "str": telemetry.input_steering(idx)},
                             "temps": {
                                 "oil": telemetry.temp_oil(idx),
                                 "water": telemetry.temp_water(idx)
