@@ -1,5 +1,5 @@
 """
-rF2 API data set - Option B (Hybrid Shared Memory + Direct REST)
+rF2 API data set - Corrected for LMU Internal Plugin Structures
 """
 from __future__ import annotations
 import requests
@@ -39,30 +39,42 @@ class TelemetryData(DataAdapter):
     def wing_front(self, index: int | None = None) -> float: return rmnan(self.shmm.rf2TeleVeh(index).mFrontWingHeight)
     def downforce_front(self, index: int | None = None) -> float: return rmnan(self.shmm.rf2TeleVeh(index).mFrontDownforce)
     def downforce_rear(self, index: int | None = None) -> float: return rmnan(self.shmm.rf2TeleVeh(index).mRearDownforce)
+    def car_state(self, index: int | None = None) -> dict:
+        veh = self.shmm.rf2TeleVeh(index)
+        return {
+            "speed_limiter": bool(veh.mSpeedLimiter),
+            "headlights": bool(veh.mHeadlights),
+            "ignition": safe_int(veh.mIgnitionStarter),
+            "brake_bias": rmnan(veh.mRearBrakeBias)
+        }
+    def wheel_details(self, index: int | None = None) -> dict:
+        wheels = self.shmm.rf2TeleVeh(index).mWheels
+        data = {}
+        pos_map = {0: "fl", 1: "fr", 2: "rl", 3: "rr"}
+        for i, pos in pos_map.items():
+            w = wheels[i]
+            data[pos] = {
+                "brake_pressure": rmnan(w.mBrakePressure),  # Pression réelle (utile pour voir les blocages)
+                "camber": rmnan(w.mCamber),  # Carrossage (radians)
+                "load": rmnan(w.mTireLoad),  # Charge verticale (Newtons)
+                "grip_fract": rmnan(w.mGripFract),  # Perte d'adhérence
+                "temp_carcass": rmnan(w.mTireCarcassTemperature) - 273.15,  # Température interne (cœur du pneu)
+                "ride_height": rmnan(w.mRideHeight)  # Hauteur de caisse
+            }
     def virtual_energy(self, index: int | None = None) -> float:
         if self.rest:
             try:
                 curr = getattr(self.rest.telemetry, 'currentVirtualEnergy', 0.0)
                 maxn = getattr(self.rest.telemetry, 'maxVirtualEnergy', 0.0)
-
-                # Cas idéal : On a le courant et le max
                 if maxn is not None and float(maxn) > 0:
                     return (float(curr) / float(maxn)) * 100.0
-
-                # Cas dégradé : Pas de max, mais une valeur courante
                 if curr is not None:
                     val = float(curr)
-                    # Si c'est un ratio (0.0-1.0), on convertit en %
-                    if val <= 1.0 and val > 0.0:
-                        return val * 100.0
-                    # Sinon on renvoie tel quel (peut-être déjà en %)
+                    if val <= 1.0 and val > 0.0: return val * 100.0
                     return val
-            except:
-                pass
-
+            except: pass
         return 0.0
-    def max_virtual_energy(self, index: int | None = None) -> float:
-        return 100.0
+    def max_virtual_energy(self, index: int | None = None) -> float: return 100.0
     def local_velocity(self, index: int | None = None) -> tuple[float, float, float]:
         vel = self.shmm.rf2TeleVeh(index).mLocalVel
         return rmnan(vel.x), rmnan(vel.y), rmnan(vel.z)
@@ -76,30 +88,23 @@ class TelemetryData(DataAdapter):
         }
     def tire_pressure(self, index: int | None = None) -> list[float]: return [rmnan(w.mPressure) for w in self.shmm.rf2TeleVeh(index).mWheels]
     def tire_wear(self, index: int | None = None) -> list[float]: return [rmnan(w.mWear) for w in self.shmm.rf2TeleVeh(index).mWheels]
-
-    # --- MÉTHODE AJOUTÉE ICI ---
     def tire_compound_name(self, index: int | None = None) -> dict:
         try:
-            # Récupération du nom (souvent un seul pour toute la voiture dans rF2)
-            name = tostr(self.shmm.rf2TeleVeh(index).mTireCompoundName)
-            # On le formate pour le frontend qui attend {fl, fr, rl, rr}
-            return {"fl": name, "fr": name, "rl": name, "rr": name}
+            veh = self.shmm.rf2TeleVeh(index)
+            front = tostr(veh.mFrontTireCompoundName)
+            rear = tostr(veh.mRearTireCompoundName)
+            return {"fl": front, "fr": front, "rl": rear, "rr": rear}
         except:
-            # Fallback si l'info n'est pas dispo
             return {"fl": "---", "fr": "---", "rl": "---", "rr": "---"}
-    # ---------------------------
-
     def brake_temp(self, index: int | None = None) -> list[float]: return [rmnan(w.mBrakeTemp) - 273.15 for w in self.shmm.rf2TeleVeh(index).mWheels]
     def brake_wear(self, index: int | None = None) -> tuple[float, float, float, float]:
-        if self.rest:
-            return getattr(self.rest.telemetry, 'brakeWear', (0.0, 0.0, 0.0, 0.0))
+        if self.rest: return getattr(self.rest.telemetry, 'brakeWear', (0.0, 0.0, 0.0, 0.0))
         return (0.0, 0.0, 0.0, 0.0)
     def surface_type(self, index: int | None = None) -> list[int]: return [safe_int(w.mSurfaceType) for w in self.shmm.rf2TeleVeh(index).mWheels]
     def wheel_detached(self, index: int | None = None) -> list[bool]: return [bool(w.mDetached) for w in self.shmm.rf2TeleVeh(index).mWheels]
     def tire_flat(self, index: int | None = None) -> list[bool]: return [bool(w.mFlat) for w in self.shmm.rf2TeleVeh(index).mWheels]
     def dents(self, index: int | None = None) -> list[int]: return [safe_int(x) for x in self.shmm.rf2TeleVeh(index).mDentSeverity]
     def overheating(self, index: int | None = None) -> bool: return bool(self.shmm.rf2TeleVeh(index).mOverheating)
-
     def electric_data(self, index: int | None = None) -> dict:
         veh = self.shmm.rf2TeleVeh(index)
         return {
@@ -113,10 +118,20 @@ class TelemetryData(DataAdapter):
 
 class ScoringData(DataAdapter):
     __slots__ = ()
+    def flag_state(self) -> dict:
+        info = self.shmm.rf2ScorInfo
+        return {
+            "yellow_global": safe_int(info.mYellowFlagState),
+            "sector_flags": [safe_int(x) for x in info.mSectorFlag],
+            "in_realtime": safe_int(info.mInRealtime),
+            "start_light": safe_int(info.mStartLight),
+            "red_lights_num": safe_int(info.mNumRedLights)
+        }
     def track_name(self) -> str: return tostr(self.shmm.rf2ScorInfo.mTrackName)
     def session_type(self) -> int: return safe_int(self.shmm.rf2ScorInfo.mSession)
     def time_info(self) -> dict:
         info = self.shmm.rf2ScorInfo
+        # mCurrentET = temps écoulé, mEndET = temps total de la session (ex: 24h)
         return {"current": rmnan(info.mCurrentET), "end": rmnan(info.mEndET), "max_laps": info.mMaxLaps}
     def game_phase(self) -> int: return safe_int(self.shmm.rf2ScorInfo.mGamePhase)
     def flag_state(self) -> dict:
@@ -128,7 +143,15 @@ class ScoringData(DataAdapter):
         }
     def weather_env(self) -> dict:
         info = self.shmm.rf2ScorInfo
-        return {"ambient_temp": rmnan(info.mAmbientTemp), "track_temp": rmnan(info.mTrackTemp), "rain": rmnan(info.mRaining), "darkness": rmnan(info.mDarkCloud), "wetness_path": (rmnan(info.mMinPathWetness), rmnan(info.mMaxPathWetness)), "wind_speed": rmnan((info.mWind.x**2 + info.mWind.y**2 + info.mWind.z**2)**0.5)}
+        # Utiliser cette temperature car plus fiable que mWeatherInfo pour l'instant
+        return {
+            "ambient_temp": rmnan(info.mAmbientTemp),
+            "track_temp": rmnan(info.mTrackTemp),
+            "rain": rmnan(info.mRaining),
+            "darkness": rmnan(info.mDarkCloud),
+            "wetness_path": (rmnan(info.mMinPathWetness), rmnan(info.mMaxPathWetness)),
+            "wind_speed": rmnan((info.mWind.x**2 + info.mWind.y**2 + info.mWind.z**2)**0.5)
+        }
     def vehicle_count(self) -> int: return self.shmm.rf2ScorInfo.mNumVehicles
     def get_vehicle_scoring(self, index: int) -> dict:
         veh = self.shmm.rf2ScorVeh(index)
@@ -143,7 +166,9 @@ class ScoringData(DataAdapter):
             "laps": veh.mTotalLaps,
             "sector": sector_map.get(safe_int(veh.mSector), 0),
             "status": safe_int(veh.mFinishStatus),
+            "pit_state": safe_int(veh.mPitState),
             "in_pits": safe_int(veh.mInPits),
+            "pit_group": tostr(veh.mPitGroup),
             "pit_stops": safe_int(veh.mNumPitstops),
             "penalties": safe_int(veh.mNumPenalties),
             "lap_dist": rmnan(veh.mLapDist),
@@ -153,6 +178,8 @@ class ScoringData(DataAdapter):
             "sectors_cur": (rmnan(veh.mCurSector1), rmnan(veh.mCurSector2)),
             "gap_leader": rmnan(veh.mTimeBehindLeader),
             "gap_next": rmnan(veh.mTimeBehindNext),
+            "flag": safe_int(veh.mFlag),
+            "under_yellow": bool(veh.mUnderYellow),
             "x": rmnan(veh.mPos.x),
             "z": rmnan(veh.mPos.z),
         }
@@ -188,7 +215,15 @@ class WeatherData(DataAdapter):
     __slots__ = ()
     def info(self) -> dict:
         winfo = self.shmm.Rf2Weather.mWeatherInfo
-        return {"et": rmnan(winfo.mET), "cloudiness": rmnan(winfo.mCloudiness), "ambient_temp": rmnan(winfo.mAmbientTempK) - 273.15, "rain_intensity": rmnan(winfo.mRaining[4])}
+
+        # CORRECTION PLUIE : mRaining est un tableau, on prend le max pour éviter le crash
+        try:
+            # Convertir l'objet CTypes en liste Python avant de faire max()
+            rain_val = max(list(winfo.mRaining))
+        except:
+            rain_val = 0.0
+
+        return {"et": rmnan(winfo.mET), "cloudiness": rmnan(winfo.mCloudiness), "ambient_temp": rmnan(winfo.mAmbientTempK) - 273.15, "rain_intensity": rmnan(rain_val)}
 
 class PitStrategyData:
     __slots__ = ("_pit_estimator", "_port")
