@@ -33,7 +33,7 @@ COLORS = {
 }
 
 # --- CONFIGURATION VPS ---
-VPS_IP = "51.178.87.25"  # Votre IP OVH
+VPS_URL = "https://enarthrodial-unpermanently-fausto.ngrok-free.dev"  # Votre IP OVH
 
 
 def normalize_id(name):
@@ -203,11 +203,16 @@ class TelemetryRecorder:
 
         def send():
             try:
-                # Timeout court pour ne pas bloquer
-                requests.post(f"{self.api_url}/api/telemetry/lap", json=payload, timeout=2)
-                print(f"💾 Télémétrie Tour {lap_num} envoyée ({len(self.buffer)} points)")
+                headers = {"Content-Type": "application/json", "ngrok-skip-browser-warning": "true"}
+                requests.post(
+                    f"{self.api_url}/api/telemetry/lap",
+                    json=payload,
+                    headers=headers,
+                    timeout=5
+                )
+                print(f"💾 Télémétrie Tour {lap_num} sauvegardée ({len(self.buffer)} points)")
             except Exception as e:
-                print(f"⚠️ Erreur envoi tour: {e}")
+                print(f"⚠️ Erreur upload télémétrie: {e}")
 
         threading.Thread(target=send, daemon=True).start()
 
@@ -238,7 +243,7 @@ class BridgeLogic:
             return True
 
         try:
-            self.connector = SocketConnector(VPS_IP)
+            self.connector = SocketConnector(VPS_URL, port=None)
             self.connector.connect()
             return True
         except Exception as e:
@@ -351,7 +356,7 @@ class BridgeLogic:
 
         # On initialise le recorder avec la méthode d'envoi d'historique du connecteur
         # NB: On suppose que send_telemetry_history existe dans votre SocketConnector (comme dans l'autre version)
-        base_url = f"http://{VPS_IP}:5000"
+        base_url = VPS_URL
         self.recorder = TelemetryRecorder(base_url, self.team_id)
 
         while self.running:
