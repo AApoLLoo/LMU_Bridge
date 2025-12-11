@@ -1,43 +1,37 @@
-import mmap
-import time
+import requests
+import json
+import random
 
-print("--- DIAGNOSTIC LMU ---")
-print("Lance le jeu et mets-toi AU VOLANT (en piste).")
-print("Appuie sur CTRL+C pour arrêter.")
+# Remplacez par l'IP de votre VPS
+VPS_URL = "http://51.178.87.25:5000"
+TEAM_ID = "test-debug"
 
-# Les différents noms possibles que le jeu peut utiliser
-NOMS_POSSIBLES = [
-    "$rFactor2SMMP_Scoring$",      # Standard
-    "$rFactor2SMMP_Telemetry$",    # Standard Télémétrie
-    "rFactor2SMMP_Scoring",        # Sans le $
-    "Local\\$rFactor2SMMP_Scoring$" # Avec préfixe Windows
-]
+print(f"Test d'envoi vers {VPS_URL}...")
 
-while True:
-    found_something = False
-    print("\nTentative de connexion...")
-    
-    for nom in NOMS_POSSIBLES:
-        try:
-            # On essaie d'ouvrir juste 1 octet pour voir si la porte s'ouvre
-            # On ne se soucie pas de la structure pour l'instant
-            shm = mmap.mmap(0, 10, tagname=nom, access=mmap.ACCESS_READ)
-            print(f"✅ SUCCÈS ! J'ai trouvé : {nom}")
-            shm.close()
-            found_something = True
-        except FileNotFoundError:
-            print(f"❌ Pas trouvé : {nom}")
-        except Exception as e:
-            print(f"⚠️ Erreur bizarre sur {nom} : {e}")
+# Fausses données de télémétrie
+fake_samples = []
+for i in range(100):
+    fake_samples.append({
+        "d": i * 10, "s": 200 + random.randint(-5, 5),
+        "t": 100, "b": 0, "g": 6, "w": 0.0,
+        "f": 50.0, "ve": 90.0, "tw": 100
+    })
 
-    if found_something:
-        print("\n🎉 VICTOIRE : Le lien est possible !")
-        print("Cela veut dire que mon fichier précédent 'rF2.py' avait une structure trop stricte.")
-        break
+payload = {
+    "sessionId": TEAM_ID,
+    "lapNumber": 1,
+    "driver": "Tester",
+    "lapTime": 95.5,
+    "samples": fake_samples
+}
+
+try:
+    resp = requests.post(f"{VPS_URL}/api/telemetry/lap", json=payload, timeout=5)
+    print(f"Code retour: {resp.status_code}")
+    print(f"Réponse: {resp.text}")
+    if resp.status_code == 200:
+        print("✅ SUCCÈS : Le VPS a bien reçu la télémétrie !")
     else:
-        print("🔴 ECHEC : Aucune mémoire trouvée.")
-        print("Vérifications à faire :")
-        print("1. As-tu copié la DLL dans 'Le Mans Ultimate/Plugins' OU 'Le Mans Ultimate/Bin64/Plugins' ?")
-        print("2. Le plugin est-il bien sur 'ON' dans le jeu ?")
-    
-    time.sleep(3)
+        print("❌ ÉCHEC : Le VPS a répondu une erreur.")
+except Exception as e:
+    print(f"❌ ERREUR CRITIQUE : Impossible de joindre le VPS. {e}")

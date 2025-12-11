@@ -211,8 +211,10 @@ class PitInfoData(DataAdapter):
         menu = self.shmm.Rf2Pit.mPitMenu
         return {"cat_idx": menu.mCategoryIndex, "cat_name": tostr(menu.mCategoryName), "choice_idx": menu.mChoiceIndex, "choice_str": tostr(menu.mChoiceString), "num_choices": menu.mNumChoices}
 
+
 class WeatherData(DataAdapter):
     __slots__ = ()
+
     def info(self) -> dict:
         winfo = self.shmm.Rf2Weather.mWeatherInfo
 
@@ -223,7 +225,38 @@ class WeatherData(DataAdapter):
         except:
             rain_val = 0.0
 
-        return {"et": rmnan(winfo.mET), "cloudiness": rmnan(winfo.mCloudiness), "ambient_temp": rmnan(winfo.mAmbientTempK) - 273.15, "rain_intensity": rmnan(rain_val)}
+        return {
+            "et": rmnan(winfo.mET),
+            "cloudiness": rmnan(winfo.mCloudiness),
+            "ambient_temp": rmnan(winfo.mAmbientTempK) - 273.15,
+            "rain_intensity": rmnan(rain_val)
+        }
+
+    # AJOUTER CETTE MÉTHODE
+    def forecast(self) -> dict:
+        """Récupère les prévisions météo depuis l'API REST"""
+        if not self.rest:
+            return {}
+
+        def _format_nodes(nodes):
+            # Transforme les WeatherNode (NamedTuple) en liste de dictionnaires
+            return [
+                {
+                    "start_percent": n.start_percent,
+                    "sky": n.sky_type,
+                    "temp": n.temperature,
+                    "rain_chance": n.rain_chance
+                }
+                for n in nodes
+            ]
+
+        # On récupère les données stockées dans RestAPIData (voir rf2_restapi.py)
+        # On utilise getattr pour éviter un crash si l'attribut n'existe pas encore
+        return {
+            "practice": _format_nodes(getattr(self.rest.telemetry, 'forecastPractice', [])),
+            "qualify": _format_nodes(getattr(self.rest.telemetry, 'forecastQualify', [])),
+            "race": _format_nodes(getattr(self.rest.telemetry, 'forecastRace', []))
+        }
 
 class PitStrategyData:
     __slots__ = ("_pit_estimator", "_port")
