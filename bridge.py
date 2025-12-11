@@ -5,8 +5,9 @@ import time
 import sys
 import os
 import logging
-import uuid  # Ajouté pour le Recorder
+import uuid
 import requests
+
 # --- FIX IMPORT ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
@@ -33,7 +34,8 @@ COLORS = {
 }
 
 # --- CONFIGURATION VPS ---
-VPS_URL = "https://enarthrodial-unpermanently-fausto.ngrok-free.dev"  # Votre IP OVH
+# Pensez à vérifier que cette URL correspond bien à votre Ngrok actif !
+VPS_URL = "https://api.racetelemetrybyfbt.com"
 
 
 def normalize_id(name):
@@ -135,14 +137,15 @@ class TextHandler(logging.Handler):
         self.text_widget.after(0, append)
 
 
-# --- AJOUT DU RECORDER (INTEGRÉ DEPUIS VOTRE AUTRE VERSION) ---
+# --- RECORDER TÉLÉMÉTRIE (HISTORIQUE) ---
 class TelemetryRecorder:
     def __init__(self, api_url, team_id):
         self.api_url = api_url
-        self.team_id = team_id
+        self.team_id = team_id  # Sera mis à jour avec l'ID Historique (ex: baliverne_RACE_123)
         self.buffer = []
         self.current_lap = -1
         self.driver_name = "Unknown"
+        self.track_name = "Unknown"
         self.last_dist = -1
 
     def update(self, lap_number, vehicle_idx, telemetry, vehicle, scoring):
@@ -183,6 +186,7 @@ class TelemetryRecorder:
                     "g": telemetry.gear(vehicle_idx),
                     "w": round(telemetry.input_steering(vehicle_idx), 2),
                     "f": round(telemetry.fuel_level(vehicle_idx), 2),
+                    "r": round(telemetry.rpm(vehicle_idx), 0),  # Ajout RPM
                     "ve": round(telemetry.virtual_energy(vehicle_idx), 1),
                     "tw": round(telemetry.tire_wear(vehicle_idx)[0], 1)
                 })
@@ -194,7 +198,7 @@ class TelemetryRecorder:
             return
 
         payload = {
-            "sessionId": self.team_id,
+            "sessionId": self.team_id,  # C'est ici que l'ID Historique est utilisé
             "lapNumber": lap_num,
             "driver": self.driver_name,
             "lapTime": lap_time,
@@ -210,11 +214,12 @@ class TelemetryRecorder:
                     headers=headers,
                     timeout=5
                 )
-                print(f"💾 Télémétrie Tour {lap_num} sauvegardée ({len(self.buffer)} points)")
+                print(f"💾 Télémétrie Tour {lap_num} sauvegardée ({len(self.buffer)} points) pour {self.team_id}")
             except Exception as e:
                 print(f"⚠️ Erreur upload télémétrie: {e}")
 
         threading.Thread(target=send, daemon=True).start()
+
 
 class BridgeLogic:
     def __init__(self, log_callback, status_callback):
@@ -231,14 +236,13 @@ class BridgeLogic:
         self.driver_pseudo = ""
         self.tracker = ConsumptionTracker(self.log)
         self.session_id = 0
-        self.recorder = None  # Init du recorder
+        self.recorder = None
 
     def set_debug(self, enabled):
         self.debug_mode = enabled
         self.log(f"🔧 Mode Debug {'ACTIVÉ' if enabled else 'DÉSACTIVÉ'}")
 
     def connect_vps(self):
-        """Remplace l'ancienne connexion DB"""
         if self.connector and self.connector.is_connected:
             return True
 
@@ -249,16 +253,6 @@ class BridgeLogic:
         except Exception as e:
             self.log(f"❌ Erreur Connexion VPS: {e}")
             return False
-
-    def check_team(self, name):
-        # En mode VPS, on fait confiance à l'utilisateur pour l'ID d'équipe
-        if not self.connector: self.connect_vps()
-        return {"exists": True, "category": "VPS Managed"}
-
-    def create_team(self, name, category, drivers):
-        # En mode VPS, la création se fait implicitement ou via le site
-        if not self.connector: self.connect_vps()
-        return True
 
     def start_loop(self, line_up_name, driver_pseudo):
         self.session_id += 1
@@ -274,11 +268,12 @@ class BridgeLogic:
         if not self.connector:
             self.connect_vps()
 
-        # --- AJOUT ICI : Enregistrement de la Lineup en BDD ---
+        # Enregistrement initial (Mode Lobby/Attente)
         if self.connector and self.connector.is_connected:
-            self.log(f"💾 Enregistrement de l'équipe '{self.team_id}'...")
-            self.connector.register_lineup(self.team_id, self.driver_pseudo)
-        # ------------------------------------------------------
+            self.log(f"💾 Connexion initiale pour '{self.team_id}'...")
+            lobby_id = f"{self.team_id}_LOBBY_{int(time.time())}"
+            # On utilise le nouveau format à 4 arguments
+            self.connector.register_lineup(self.team_id, self.driver_pseudo, lobby_id, "LOBBY")
 
         self.thread = threading.Thread(target=self._run, args=(current_session_id,), daemon=True)
         self.thread.start()
@@ -302,14 +297,11 @@ class BridgeLogic:
 
         try:
             if self.connector:
-                # Optionnel : déconnexion socket propre
-                # self.connector.sio.disconnect()
-                pass
+                self.connector.disconnect()
         except:
             pass
 
         if self.thread and self.thread.is_alive():
-            self.log("⌛ Attente arrêt thread...")
             try:
                 self.thread.join(timeout=3.0)
             except:
@@ -348,16 +340,14 @@ class BridgeLogic:
         telemetry = scoring = rules = extended = pit_info = weather = vehicle_helper = None
         last_game_check = 0
         last_update_time = 0
-        UPDATE_RATE = 0.05  # 20 fois par seconde (rapide pour le Live Timing)
+        UPDATE_RATE = 0.05
 
-        # --- INIT RECORDER & UUID SESSION ---
-        # On génère un ID unique pour cette session de jeu
-        session_uuid = str(uuid.uuid4())
+        # Variables pour la détection de session
+        last_session_type = -1
+        current_history_id = f"{self.team_id}_WAITING"
 
-        # On initialise le recorder avec la méthode d'envoi d'historique du connecteur
-        # NB: On suppose que send_telemetry_history existe dans votre SocketConnector (comme dans l'autre version)
-        base_url = VPS_URL
-        self.recorder = TelemetryRecorder(base_url, self.team_id)
+        # Init Recorder
+        self.recorder = TelemetryRecorder(VPS_URL, current_history_id)
 
         while self.running:
             if self.session_id != my_session_id: break
@@ -396,7 +386,47 @@ class BridgeLogic:
                 if not self.running: break
                 status = vehicle_helper.get_local_driver_status()
 
-                # Mise à jour des infos contextuelles pour le recorder
+                # --- GESTION CHANGEMENT DE SESSION ---
+                if self.rf2_info and scoring:
+                    try:
+                        # 0=Test, 1-4=Practice, 5-8=Qualy, 9=Warmup, 10+=Race
+                        sess_type_int = scoring.session_type()
+
+                        if sess_type_int != last_session_type:
+                            sess_name = "TEST"
+                            if 1 <= sess_type_int <= 4:
+                                sess_name = "PRACTICE"
+                            elif 5 <= sess_type_int <= 8:
+                                sess_name = "QUALIFY"
+                            elif sess_type_int == 9:
+                                sess_name = "WARMUP"
+                            elif sess_type_int >= 10:
+                                sess_name = "RACE"
+
+                            # ID Unique: NomTeam_Type_Timestamp
+                            current_history_id = f"{self.team_id}_{sess_name}_{int(time.time())}"
+
+                            self.log(f"🔄 Nouvelle Séance détectée : {sess_name}")
+                            self.log(f"📂 ID Historique : {current_history_id}")
+
+                            # Update Recorder
+                            if self.recorder:
+                                self.recorder.team_id = current_history_id
+
+                            # Notify Server (Création table sessions)
+                            if self.connector:
+                                self.connector.register_lineup(
+                                    self.team_id,
+                                    self.driver_pseudo,
+                                    current_history_id,
+                                    sess_name
+                                )
+
+                            last_session_type = sess_type_int
+                    except Exception as e:
+                        if self.debug_mode: self.log(f"Err session check: {e}")
+
+                # Mise à jour recorder info
                 if self.rf2_info and scoring:
                     self.recorder.driver_name = status.get('driver_name', 'Unknown')
                     self.recorder.track_name = scoring.track_name() if scoring else "Unknown"
@@ -412,7 +442,7 @@ class BridgeLogic:
                     try:
                         self.recorder.update(curr_lap, idx, telemetry, vehicle_helper, scoring)
                     except Exception as rec_err:
-                        self.log(f"⚠️ Erreur Recorder: {rec_err}")
+                        if self.debug_mode: self.log(f"⚠️ Erreur Recorder: {rec_err}")
                     # ------------------------
 
                     # --- Météo ---
@@ -508,8 +538,8 @@ class BridgeLogic:
                         self.set_status(f"LIVE ({game_driver})", COLORS["accent"])
 
                         if self.debug_mode:
-                            bw = telemetry.brake_wear(idx)
-                            self.log(f"📤 Sent VPS | Spd: {payload['telemetry']['speed']:.0f}")
+                            # self.log(f"📤 Sent VPS | Spd: {payload['telemetry']['speed']:.0f}")
+                            self.log(f"payload = {payload}")
 
                 elif not status['is_driving']:
                     self.set_status("IDLE (NOT DRIVING)", "#94a3b8")

@@ -1,10 +1,8 @@
 import socketio
 import time
 
-
 class SocketConnector:
     def __init__(self, server_url, port=5000):
-        # Correction : On gère le cas où l'URL contient déjà "http" (Ngrok) ou si c'est juste une IP
         if server_url.startswith("http"):
             self.server_url = server_url
         else:
@@ -30,11 +28,9 @@ class SocketConnector:
 
         try:
             print(f"Tentative de connexion au VPS ({self.server_url})...")
-            # AJOUT CRITIQUE : Ce header permet de passer la sécurité Ngrok
             self.sio.connect(
                 self.server_url,
-                wait_timeout=5,
-                headers={"ngrok-skip-browser-warning": "true"}
+                wait_timeout=10,
             )
             self.is_connected = True
             print("✅ Connecté au serveur Relais !")
@@ -45,13 +41,16 @@ class SocketConnector:
                 print(f"⚠️ Erreur de connexion VPS : {e}")
                 self.is_connected = False
 
-    def register_lineup(self, team_id, driver_name):
+    # MODIFICATION ICI : On ajoute history_id et session_type
+    def register_lineup(self, team_id, driver_name, history_id, session_type):
         if not self.is_connected and not self.sio.connected:
             self.connect()
 
         payload = {
-            "teamId": team_id,
+            "teamId": team_id,          # ID pour le LIVE (ex: "baliverne")
+            "historyId": history_id,    # ID pour l'ANALYSE (ex: "baliverne_Race_123456")
             "creator": driver_name,
+            "sessionType": session_type,
             "timestamp": time.time(),
             "carCategory": "Unknown",
             "status": "CREATED"
@@ -59,9 +58,9 @@ class SocketConnector:
 
         try:
             self.sio.emit('create_team', payload)
-            print(f"🆕 Demande de création de lineup envoyée pour : {team_id}")
+            print(f"🆕 Session Historique créée : {history_id} ({session_type})")
         except Exception as e:
-            print(f"❌ Erreur lors de la création de la lineup : {e}")
+            print(f"❌ Erreur création session : {e}")
 
     def send_data(self, data):
         if not self.is_connected and not self.sio.connected:
